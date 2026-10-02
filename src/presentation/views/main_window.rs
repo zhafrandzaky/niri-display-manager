@@ -14,20 +14,55 @@ use gtk::glib;
 use gtk4 as gtk;
 
 use crate::APP_ID;
+use crate::cli::ParsedArgs;
 use crate::infrastructure::drm_sysfs::SysfsProbe;
 use crate::infrastructure::niri_ipc::NiriCliClient;
 use crate::infrastructure::process_runner::{MirrorPidFile, SystemCommandRunner, SystemSupervisor};
 use crate::presentation::view_model::{self, AppAction, AppEvent, AppState, InfoRow, ProfileRow};
-use crate::service::backup_service::FileConfigStore;
+use crate::service::backup_service::{ConfigMode, ConfigStore, FileConfigStore};
+use crate::service::config_paths::{Environment, resolve_paths};
 use crate::service::display_service::DisplayService;
 
 type Service = DisplayService<NiriCliClient, SysfsProbe, FileConfigStore, SystemSupervisor>;
 
 /// Run the GTK application until the window closes.
-pub fn run() -> anyhow::Result<glib::ExitCode> {
+///
+/// Configuration paths are resolved before the GUI starts so `--print-paths`
+/// can report them without opening a window.
+pub fn run(args: ParsedArgs) -> anyhow::Result<glib::ExitCode> {
+    let environment = Environment::from_process();
+    let resolved = resolve_paths(&args.options, &environment)?;
+    let store = FileConfigStore::discover(resolved, &environment)?;
+
+    if args.options.print_paths {
+        print!("{}", describe_paths(&store));
+        return Ok(glib::ExitCode::SUCCESS);
+    }
+
     let app = adw::Application::builder().application_id(APP_ID).build();
-    app.connect_activate(build_ui);
-    Ok(app.run())
+    let activated = Rc::new(std::cell::Cell::new(false));
+    app.connect_activate(move |app| {
+        // Secondary launches must not build a second window or worker.
+        if activated.get() {
+            return;
+        }
+        activated.set(true);
+        build_ui(app, store.clone());
+    });
+    Ok(app.run_with_args(&args.forwarded))
+}
+
+fn describe_paths(store: &FileConfigStore) -> String {
+    let mode = match store.mode() {
+        ConfigMode::Modular => "modular (display file included by the main configuration)",
+        ConfigMode::Inline => "inline (managed section in the main configuration)",
+    };
+    format!(
+        "mode:          {mode}\nmain config:   {}\nmanaged file:  {}\nbackup:        {}\n",
+        store.main_config_path().display(),
+        store.managed_config_path().display(),
+        store.backup_path().display(),
+    )
 }
 
 struct Ui {
@@ -47,7 +82,7 @@ struct Ui {
     actions: async_channel::Sender<AppAction>,
 }
 
-fn build_ui(app: &adw::Application) {
+fn build_ui(app: &adw::Application, store: FileConfigStore) {
     let (action_sender, action_receiver) = async_channel::unbounded::<AppAction>();
     let (event_sender, event_receiver) = async_channel::unbounded::<AppEvent>();
 
@@ -161,15 +196,16 @@ fn build_ui(app: &adw::Application) {
     rebuild(&ui);
     window.present();
 
-    spawn_worker(action_receiver, event_sender);
+    spawn_worker(action_receiver, event_sender, store);
     install_event_handler(ui, event_receiver);
 }
 
 fn spawn_worker(
     action_receiver: async_channel::Receiver<AppAction>,
     event_sender: async_channel::Sender<AppEvent>,
+    store: FileConfigStore,
 ) {
-    let service = build_service();
+    let service = build_service(store);
     let spawn_result = std::thread::Builder::new()
         .name("niri-display-manager-worker".to_owned())
         .spawn(move || worker_loop(service, action_receiver, event_sender));
@@ -178,11 +214,11 @@ fn spawn_worker(
     }
 }
 
-fn build_service() -> Service {
+fn build_service(store: FileConfigStore) -> Service {
     DisplayService::new(
         NiriCliClient::new(std::sync::Arc::new(SystemCommandRunner)),
         SysfsProbe::system(),
-        FileConfigStore::from_environment(),
+        store,
         SystemSupervisor::new(),
         MirrorPidFile::new(mirror_pid_path()),
     )

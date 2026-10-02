@@ -6,6 +6,7 @@
 
 use crate::domain::display::{ConnectorStatus, DisplayOutput, format_scale};
 use crate::domain::profile::ProfileKind;
+use crate::service::backup_service::ConfigMode;
 use crate::service::display_service::{ApplyReport, SystemState};
 
 /// Actions dispatched from the UI to the worker thread.
@@ -35,7 +36,8 @@ pub struct AppState {
     pub connectors: Vec<ConnectorStatus>,
     pub active_profile: Option<ProfileKind>,
     pub mirror_running: bool,
-    pub include_registered: bool,
+    pub config_mode: ConfigMode,
+    pub display_file_registered: bool,
     pub busy: bool,
 }
 
@@ -46,7 +48,8 @@ impl AppState {
             connectors: state.connectors,
             active_profile: state.active_profile,
             mirror_running: state.mirror_running,
-            include_registered: state.include_registered,
+            config_mode: state.config_mode,
+            display_file_registered: state.display_file_registered,
             busy: false,
         }
     }
@@ -142,8 +145,12 @@ pub fn status_summary(state: &AppState) -> String {
     } else {
         "No managed profile applied".to_owned()
     };
-    if !state.include_registered {
-        summary.push_str(" - display.kdl is not included by config.kdl");
+    match state.config_mode {
+        ConfigMode::Inline => summary.push_str(" - portable mode (fenced section in config.kdl)"),
+        ConfigMode::Modular if !state.display_file_registered => {
+            summary.push_str(" - setup required: the display file is not included by config.kdl")
+        }
+        ConfigMode::Modular => summary.push_str(" - modular mode (cfg/display.kdl)"),
     }
     summary
 }
@@ -209,7 +216,8 @@ mod tests {
             ],
             active_profile: Some(ProfileKind::ExtendRight),
             mirror_running: false,
-            include_registered: true,
+            config_mode: ConfigMode::Modular,
+            display_file_registered: true,
             busy: false,
         }
     }
@@ -246,23 +254,39 @@ mod tests {
     }
 
     #[test]
-    fn status_summary_covers_busy_mirror_profile_and_include_warning() {
+    fn status_summary_covers_busy_mirror_profile_and_modes() {
         let mut current = state();
-        assert_eq!(status_summary(&current), "Active profile: Extend Right");
+        assert_eq!(
+            status_summary(&current),
+            "Active profile: Extend Right - modular mode (cfg/display.kdl)"
+        );
 
         current.mirror_running = true;
-        assert_eq!(status_summary(&current), "Mirroring is active");
+        assert_eq!(
+            status_summary(&current),
+            "Mirroring is active - modular mode (cfg/display.kdl)"
+        );
 
         current.busy = true;
-        assert_eq!(status_summary(&current), "Applying changes...");
+        assert_eq!(
+            status_summary(&current),
+            "Applying changes... - modular mode (cfg/display.kdl)"
+        );
 
         current.busy = false;
         current.active_profile = None;
         current.mirror_running = false;
-        current.include_registered = false;
+        current.config_mode = ConfigMode::Inline;
         assert_eq!(
             status_summary(&current),
-            "No managed profile applied - display.kdl is not included by config.kdl"
+            "No managed profile applied - portable mode (fenced section in config.kdl)"
+        );
+
+        current.config_mode = ConfigMode::Modular;
+        current.display_file_registered = false;
+        assert_eq!(
+            status_summary(&current),
+            "No managed profile applied - setup required: the display file is not included by config.kdl"
         );
     }
 
