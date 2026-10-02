@@ -448,4 +448,60 @@ mod tests {
         assert!(!cleaned);
         assert_eq!(pid_file.read().unwrap(), None);
     }
+
+    #[test]
+    fn runner_reports_spawn_failures() {
+        let runner = SystemCommandRunner;
+        let spec = CommandSpec::new("/nonexistent/niri-display-manager-test", vec![]);
+        match runner.run(&spec) {
+            Err(ProcessError::Spawn { program, .. }) => {
+                assert_eq!(program, "/nonexistent/niri-display-manager-test");
+            }
+            other => panic!("expected a spawn error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn supervisor_reports_a_finished_child_as_not_running() {
+        let supervisor = SystemSupervisor::new();
+        supervisor.spawn(&CommandSpec::new("true", vec![])).unwrap();
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(!supervisor.is_running().unwrap());
+    }
+
+    #[test]
+    fn terminating_without_a_child_is_a_no_op() {
+        let supervisor = SystemSupervisor::new();
+        supervisor.terminate(Duration::from_millis(50)).unwrap();
+        assert!(!supervisor.is_running().unwrap());
+    }
+
+    #[test]
+    fn pid_file_ignores_malformed_contents() {
+        let directory = tempfile::tempdir().unwrap();
+        let pid_file = MirrorPidFile::new(directory.path().join("mirror.pid"));
+        std::fs::write(pid_file.path(), "not-a-pid\n").unwrap();
+        assert_eq!(pid_file.read().unwrap(), None);
+        assert!(!pid_file.cleanup_orphan(|_| true).unwrap());
+    }
+
+    #[test]
+    fn cleanup_orphan_terminates_a_tracked_process() {
+        let mut child = Command::new("sleep").arg("30").spawn().unwrap();
+        let pid = child.id();
+        let directory = tempfile::tempdir().unwrap();
+        let pid_file = MirrorPidFile::new(directory.path().join("mirror.pid"));
+        pid_file.write(pid).unwrap();
+
+        let cleaned = pid_file.cleanup_orphan(|_| true).unwrap();
+        assert!(cleaned);
+        assert!(!process_exists(pid));
+        assert_eq!(pid_file.read().unwrap(), None);
+        let _ = child.wait();
+    }
+
+    #[test]
+    fn wl_mirror_detection_rejects_unknown_pids() {
+        assert!(!process_is_wl_mirror(99_999_999));
+    }
 }
