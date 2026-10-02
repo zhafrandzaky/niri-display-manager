@@ -7,7 +7,7 @@ This guide targets CachyOS and Arch Linux with a niri Wayland session.
 Install the runtime and build dependencies:
 
 ```sh
-sudo pacman -S --needed rustup gtk4 libadwaita wl-mirror jq base-devel
+sudo pacman -S --needed rustup gtk4 libadwaita wl-mirror jq librsvg base-devel
 ```
 
 | Package | Why it is needed |
@@ -17,6 +17,7 @@ sudo pacman -S --needed rustup gtk4 libadwaita wl-mirror jq base-devel
 | `libadwaita` | Libadwaita development files |
 | `wl-mirror` | HDMI mirroring backend used by the Mirror / Presentation profile |
 | `jq` | Optional; convenient for inspecting `niri msg --json` output manually |
+| `librsvg` | Optional; renders the 128x128 PNG icon at install time (ImageMagick is an alternative) |
 | `base-devel` | Linker and standard build tools |
 
 Provision the Rust toolchain (only needed once per user):
@@ -71,7 +72,13 @@ This builds the release binary and installs, by default into `~/.local`:
 |---|---|
 | Binary | `~/.local/bin/niri-display-manager` |
 | Launcher entry | `~/.local/share/applications/niri-display-manager.desktop` |
-| Icon | `~/.local/share/icons/hicolor/scalable/apps/niri-display-manager.svg` |
+| Scalable icon | `~/.local/share/icons/hicolor/scalable/apps/niri-display-manager.svg` |
+| Raster icon | `~/.local/share/icons/hicolor/128x128/apps/niri-display-manager.png` |
+
+The 128x128 PNG is rendered from the SVG at install time with `rsvg-convert`,
+`magick`, or `convert` (first available); when no renderer is present, the
+pre-rendered PNG committed in `data/icons` is used. `make icons` refreshes that
+committed asset after icon changes.
 
 The script refreshes the desktop database and the icon cache when the required
 tools are available, so the entry appears in Rofi, Fuzzel, and application
@@ -96,8 +103,10 @@ install -Dm755 target/release/niri-display-manager ~/.local/bin/niri-display-man
 install -Dm644 data/niri-display-manager.desktop ~/.local/share/applications/niri-display-manager.desktop
 install -Dm644 data/icons/hicolor/scalable/apps/niri-display-manager.svg \
     ~/.local/share/icons/hicolor/scalable/apps/niri-display-manager.svg
+install -Dm644 data/icons/hicolor/128x128/apps/niri-display-manager.png \
+    ~/.local/share/icons/hicolor/128x128/apps/niri-display-manager.png
 update-desktop-database ~/.local/share/applications 2>/dev/null || true
-gtk-update-icon-cache -q -t -f ~/.local/share/icons/hicolor 2>/dev/null || true
+gtk-update-icon-cache -f -t ~/.local/share/icons/hicolor 2>/dev/null || true
 ```
 
 ## 5. Verify
@@ -140,7 +149,7 @@ copy is no longer needed.
 | `pkg-config` cannot find `libadwaita-1` | Install the `libadwaita` package |
 | Build fails on `glib-sys` | Ensure `base-devel` and pkg-config are installed |
 | App does not appear in the launcher | Re-run `update-desktop-database ~/.local/share/applications` |
-| Icon missing in menus | Re-run `gtk-update-icon-cache -f ~/.local/share/icons/hicolor` |
+| Icon missing in menus | Re-run `gtk-update-icon-cache -f -t ~/.local/share/icons/hicolor`; both the scalable SVG and the 128x128 PNG are installed |
 | Mirror profile reports wl-mirror missing | `sudo pacman -S wl-mirror` |
 | HDMI output on the NVIDIA card is not detected | Ensure `nvidia_drm.modeset=1` is set in your kernel parameters and reboot |
 | `niri validate` reports the generated file | Open an issue with the content of `display.kdl`; the manager rolls back automatically and never leaves an invalid file active |

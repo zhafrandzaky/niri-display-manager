@@ -23,7 +23,7 @@ HDMI ports are split across `card0` and `card1`.
 | Multi-GPU aware | Reads `/sys/class/drm` so a cable on either GPU is detected |
 | Fail-safe external-only | The internal panel is only turned off when an external display is active |
 | Zero-emoji UI | Technical ASCII labels and freedesktop symbolic icons only |
-| Launcher entry | Ships a `.desktop` file and scalable icon for Rofi, Fuzzel, and application menus |
+| Launcher entry | Ships a `.desktop` file plus scalable SVG and 128x128 PNG icons for Rofi, Fuzzel, and application menus |
 
 ## System requirements
 
@@ -40,7 +40,7 @@ HDMI ports are split across `card0` and `card1`.
 
 ```sh
 # Dependencies (CachyOS / Arch Linux)
-sudo pacman -S --needed rustup gtk4 libadwaita wl-mirror jq base-devel
+sudo pacman -S --needed rustup gtk4 libadwaita wl-mirror jq librsvg base-devel
 
 # Build and install for the current user (~/.local by default)
 make install
@@ -104,7 +104,7 @@ src/
 ├── service/                 application use cases and rollback pipeline
 ├── infrastructure/          niri IPC, DRM sysfs, KDL fence, process supervision
 └── presentation/            GTK4 / libadwaita UI and worker wiring
-data/                        desktop entry and scalable icon
+data/                        desktop entry, scalable SVG, and 128x128 PNG icon
 tests/                       integration and live-environment tests
 docs/                        architecture, installation, usage, plan
 ```
