@@ -6,4 +6,5 @@
 //! the layer is fully testable with fakes.
 
 pub mod backup_service;
+pub mod config_paths;
 pub mod display_service;

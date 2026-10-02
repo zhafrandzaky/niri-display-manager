@@ -5,8 +5,11 @@
 //! untouched. `niri validate` remains the authority on whether the result is
 //! valid before it is loaded.
 //!
-//! Included here is also the helper that detects whether the display file is
-//! registered through an `include` directive in the main niri configuration.
+//! This module also provides full-path include detection so the manager can
+//! tell whether a dedicated display file is wired into the main configuration
+//! or whether the portable inline mode must be used.
+
+use std::path::{Component, Path, PathBuf};
 
 use crate::domain::profile::{LayoutPlan, ProfileKind};
 
@@ -98,25 +101,81 @@ pub fn section_profile(contents: &str) -> Option<ProfileKind> {
         .and_then(|id| ProfileKind::from_id(id.trim()))
 }
 
-/// Whether `main_config` registers `file_name` through an `include` directive.
+/// Extract file paths referenced by top-level `include` directives.
 ///
-/// The check is deliberately textual and conservative: it exists to warn the
-/// user about a missing include, not to be a KDL parser.
-pub fn is_included_by(main_config: &str, file_name: &str) -> bool {
-    for raw_line in main_config.lines() {
-        let line = raw_line.trim();
-        if line.is_empty() || line.starts_with("//") {
-            continue;
-        }
-        let Some(rest) = line.strip_prefix("include") else {
-            continue;
-        };
-        let rest = rest.trim().trim_matches('"');
-        if rest.ends_with(file_name) {
-            return true;
+/// Handles `include "path"` and `include optional=true "path"`. Only
+/// directives starting at the beginning of a line are considered, matching
+/// niri's requirement that includes are top-level; comments and malformed
+/// lines are ignored.
+pub fn collect_include_paths(contents: &str) -> Vec<String> {
+    contents.lines().filter_map(parse_include_line).collect()
+}
+
+fn parse_include_line(raw_line: &str) -> Option<String> {
+    let rest = raw_line.strip_prefix("include")?;
+    if !rest.starts_with(|character: char| character.is_whitespace() || character == '"') {
+        return None;
+    }
+    // Options such as `optional=true` may precede the quoted path.
+    let mut quoted = rest.split('"');
+    quoted.next()?;
+    let path = quoted.next()?;
+    if path.is_empty() {
+        None
+    } else {
+        Some(path.to_owned())
+    }
+}
+
+/// Lexically normalize a path, resolving `.` and `..` without filesystem
+/// access. Used for comparison only; it never touches the disk.
+pub fn normalize_path(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !normalized.pop() {
+                    normalized.push("..");
+                }
+            }
+            other => normalized.push(other.as_os_str()),
         }
     }
-    false
+    normalized
+}
+
+/// Resolve an include path the way niri does: relative to the including file,
+/// absolute, or `~/`-relative when a home directory is known.
+pub fn resolve_include(include: &str, base_dir: &Path, home: Option<&Path>) -> PathBuf {
+    if let Some(rest) = include.strip_prefix("~/")
+        && let Some(home) = home
+    {
+        return normalize_path(&home.join(rest));
+    }
+    let path = Path::new(include);
+    if path.is_absolute() {
+        normalize_path(path)
+    } else {
+        normalize_path(&base_dir.join(path))
+    }
+}
+
+/// Whether the include directives in `contents` resolve to `target`.
+///
+/// `target` must already be absolute and normalized. The comparison is a full
+/// path comparison, so an unrelated file that merely shares the basename (for
+/// example `old/display.kdl` when the target is `cfg/display.kdl`) is not
+/// treated as a match.
+pub fn includes_target(
+    contents: &str,
+    base_dir: &Path,
+    target: &Path,
+    home: Option<&Path>,
+) -> bool {
+    collect_include_paths(contents)
+        .iter()
+        .any(|include| resolve_include(include, base_dir, home) == target)
 }
 
 fn find_section_range(contents: &str) -> Option<(usize, usize)> {
@@ -246,14 +305,54 @@ mod tests {
     }
 
     #[test]
-    fn detects_include_registration() {
-        let main_config =
-            "// niri config\ninclude \"./cfg/animation.kdl\"\ninclude \"./cfg/display.kdl\"\n";
-        assert!(is_included_by(main_config, "display.kdl"));
-        assert!(!is_included_by(main_config, "input.kdl"));
+    fn collects_include_paths_from_top_level_directives() {
+        let contents = "// include \"commented.kdl\"\ninclude \"a.kdl\"\ninclude optional=true \"./cfg/display.kdl\"\n\nlayout {\n    include \"nested.kdl\"\n}\ninclude \"b.kdl\"\n";
+        assert_eq!(
+            collect_include_paths(contents),
+            vec!["a.kdl", "./cfg/display.kdl", "b.kdl"]
+        );
+        assert!(collect_include_paths("").is_empty());
+        assert!(collect_include_paths("included-something \"x.kdl\"\n").is_empty());
+        assert!(collect_include_paths("include \"\"\n").is_empty());
+    }
 
-        let commented = "// include \"./cfg/display.kdl\"\n";
-        assert!(!is_included_by(commented, "display.kdl"));
-        assert!(!is_included_by("", "display.kdl"));
+    #[test]
+    fn resolves_and_normalizes_include_paths() {
+        let base = Path::new("/home/user/.config/niri");
+        assert_eq!(
+            resolve_include("./cfg/display.kdl", base, None),
+            PathBuf::from("/home/user/.config/niri/cfg/display.kdl")
+        );
+        assert_eq!(
+            resolve_include("/abs/display.kdl", base, None),
+            PathBuf::from("/abs/display.kdl")
+        );
+        assert_eq!(
+            resolve_include("~/niri/display.kdl", base, Some(Path::new("/home/user"))),
+            PathBuf::from("/home/user/niri/display.kdl")
+        );
+        assert_eq!(
+            normalize_path(Path::new("/a/b/../c/./d")),
+            PathBuf::from("/a/c/d")
+        );
+    }
+
+    #[test]
+    fn matches_only_the_full_target_path() {
+        let base = Path::new("/home/user/.config/niri");
+        let target = PathBuf::from("/home/user/.config/niri/cfg/display.kdl");
+
+        let direct = "include \"./cfg/display.kdl\"\n";
+        assert!(includes_target(direct, base, &target, None));
+
+        let absolute = "include \"/home/user/.config/niri/cfg/display.kdl\"\n";
+        assert!(includes_target(absolute, base, &target, None));
+
+        // A different file with the same basename must not match.
+        let false_positive = "include \"old/display.kdl\"\n";
+        assert!(!includes_target(false_positive, base, &target, None));
+
+        let unrelated = "include \"./cfg/input.kdl\"\n";
+        assert!(!includes_target(unrelated, base, &target, None));
     }
 }

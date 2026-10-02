@@ -162,11 +162,11 @@ impl HardwareProbe for FakeProbe {
     }
 }
 
-#[derive(Default)]
 struct FakeConfigState {
     display: String,
     backup: Option<String>,
     registered: bool,
+    mode: ConfigMode,
 }
 
 struct FakeConfig {
@@ -180,6 +180,7 @@ impl FakeConfig {
                 display: display.into(),
                 backup: None,
                 registered: true,
+                mode: ConfigMode::Modular,
             }),
         }
     }
@@ -190,8 +191,14 @@ impl FakeConfig {
                 display: display.into(),
                 backup: Some(backup.into()),
                 registered: true,
+                mode: ConfigMode::Modular,
             }),
         }
+    }
+
+    fn unregistered(self) -> Self {
+        self.state.lock().unwrap().registered = false;
+        self
     }
 
     fn display(&self) -> String {
@@ -204,7 +211,23 @@ impl FakeConfig {
 }
 
 impl ConfigStore for FakeConfig {
-    fn read_display_config(&self) -> Result<String, ConfigError> {
+    fn mode(&self) -> ConfigMode {
+        self.state.lock().unwrap().mode
+    }
+
+    fn main_config_path(&self) -> &Path {
+        Path::new("/fake/config.kdl")
+    }
+
+    fn managed_config_path(&self) -> &Path {
+        Path::new("/fake/display.kdl")
+    }
+
+    fn backup_path(&self) -> &Path {
+        Path::new("/fake/display.kdl.bak")
+    }
+
+    fn read_managed_config(&self) -> Result<String, ConfigError> {
         Ok(self.state.lock().unwrap().display.clone())
     }
 
@@ -237,15 +260,7 @@ impl ConfigStore for FakeConfig {
         Ok(RestoreOutcome::NoChange)
     }
 
-    fn display_config_path(&self) -> &Path {
-        Path::new("/fake/display.kdl")
-    }
-
-    fn main_config_path(&self) -> &Path {
-        Path::new("/fake/config.kdl")
-    }
-
-    fn is_registered_in_main_config(&self) -> Result<bool, ConfigError> {
+    fn display_file_registered(&self) -> Result<bool, ConfigError> {
         Ok(self.state.lock().unwrap().registered)
     }
 }
@@ -416,28 +431,32 @@ impl NiriClient for ArcedNiri {
 }
 
 impl ConfigStore for ArcedConfig {
-    fn read_display_config(&self) -> Result<String, ConfigError> {
-        self.0.read_display_config()
+    fn mode(&self) -> ConfigMode {
+        self.0.mode()
     }
-    fn snapshot(&self) -> Result<super::super::backup_service::SnapshotOutcome, ConfigError> {
+    fn main_config_path(&self) -> &Path {
+        self.0.main_config_path()
+    }
+    fn managed_config_path(&self) -> &Path {
+        self.0.managed_config_path()
+    }
+    fn backup_path(&self) -> &Path {
+        self.0.backup_path()
+    }
+    fn read_managed_config(&self) -> Result<String, ConfigError> {
+        self.0.read_managed_config()
+    }
+    fn snapshot(&self) -> Result<SnapshotOutcome, ConfigError> {
         self.0.snapshot()
     }
     fn write_managed_section(&self, section: &str) -> Result<(), ConfigError> {
         self.0.write_managed_section(section)
     }
-    fn restore_snapshot(
-        &self,
-    ) -> Result<super::super::backup_service::RestoreOutcome, ConfigError> {
+    fn restore_snapshot(&self) -> Result<RestoreOutcome, ConfigError> {
         self.0.restore_snapshot()
     }
-    fn display_config_path(&self) -> &Path {
-        self.0.display_config_path()
-    }
-    fn main_config_path(&self) -> &Path {
-        self.0.main_config_path()
-    }
-    fn is_registered_in_main_config(&self) -> Result<bool, ConfigError> {
-        self.0.is_registered_in_main_config()
+    fn display_file_registered(&self) -> Result<bool, ConfigError> {
+        self.0.display_file_registered()
     }
 }
 
@@ -757,8 +776,42 @@ fn refresh_state_reports_profile_include_and_mirror_status() {
     let state = fixture.service.refresh_state().unwrap();
     assert_eq!(state.active_profile, Some(ProfileKind::Mirror));
     assert!(state.mirror_running);
-    assert!(state.include_registered);
+    assert_eq!(state.config_mode, ConfigMode::Modular);
+    assert!(state.display_file_registered);
     assert_eq!(state.outputs.len(), 1);
+}
+
+#[test]
+fn setup_required_state_fails_fast_for_writes_but_allows_reset() {
+    let base = vec![
+        enabled_output("eDP-1", 1920),
+        enabled_output("HDMI-A-1", 2560),
+    ];
+    let fixture = make_service(
+        FakeNiri::new(base),
+        vec![],
+        FakeConfig::with_display("// user config\n").unregistered(),
+        FakeSupervisor::default(),
+    );
+
+    let error = fixture
+        .service
+        .apply_profile(ProfileKind::ExtendRight)
+        .unwrap_err();
+    assert!(
+        matches!(error, ServiceError::SetupRequired(_)),
+        "got {error}"
+    );
+    assert_eq!(fixture.config.display(), "// user config\n");
+    assert_eq!(fixture.config.backup(), None);
+    let calls = fixture.niri.calls();
+    assert!(!calls.contains(&"validate".to_owned()));
+
+    // The reset profile still works: it only restores, it never writes.
+    fixture
+        .service
+        .apply_profile(ProfileKind::InternalOnly)
+        .unwrap();
 }
 
 #[test]

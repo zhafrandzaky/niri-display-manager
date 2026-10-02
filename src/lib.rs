@@ -17,6 +17,7 @@
 )]
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
+pub mod cli;
 pub mod domain;
 pub mod infrastructure;
 pub mod presentation;

@@ -16,7 +16,7 @@
 
 use std::time::Duration;
 
-use super::backup_service::{ConfigError, ConfigStore};
+use super::backup_service::{ConfigError, ConfigMode, ConfigStore};
 use crate::domain::display::{ConnectorStatus, DisplayOutput};
 use crate::domain::profile::{self, LayoutPlan, MirrorPlan, PlanError, ProfileKind};
 use crate::infrastructure::drm_sysfs::{HardwareError, HardwareProbe};
@@ -39,6 +39,8 @@ pub enum ServiceError {
     Process(#[from] ProcessError),
     #[error("cannot plan profile: {0}")]
     Plan(#[from] PlanError),
+    #[error("setup required: {0}")]
+    SetupRequired(String),
     #[error(
         "niri rejected the generated configuration; the previous configuration was restored: {0}"
     )]
@@ -58,7 +60,8 @@ pub struct SystemState {
     pub connectors: Vec<ConnectorStatus>,
     pub active_profile: Option<ProfileKind>,
     pub mirror_running: bool,
-    pub include_registered: bool,
+    pub config_mode: ConfigMode,
+    pub display_file_registered: bool,
 }
 
 /// Outcome of a successful profile application.
@@ -140,15 +143,16 @@ where
     pub fn refresh_state(&self) -> Result<SystemState, ServiceError> {
         let outputs = self.niri.outputs()?;
         let connectors = self.probe.connectors()?;
-        let active_profile = kdl_parser::section_profile(&self.config.read_display_config()?);
+        let active_profile = kdl_parser::section_profile(&self.config.read_managed_config()?);
         let mirror_running = self.supervisor.is_running()?;
-        let include_registered = self.config.is_registered_in_main_config()?;
+        let display_file_registered = self.config.display_file_registered()?;
         Ok(SystemState {
             outputs,
             connectors,
             active_profile,
             mirror_running,
-            include_registered,
+            config_mode: self.config.mode(),
+            display_file_registered,
         })
     }
 
@@ -159,9 +163,18 @@ where
 
         let layout = profile::plan_profile(profile, &outputs, &connectors)?;
         let mut warnings = collect_warnings(profile, &layout, &outputs, &connectors);
-        if !self.config.is_registered_in_main_config()? {
+
+        let registered = self.config.display_file_registered()?;
+        if self.config.mode() == ConfigMode::Modular && !registered {
+            if profile != ProfileKind::InternalOnly {
+                return Err(ServiceError::SetupRequired(format!(
+                    "{} is not included by {}; add `include \"cfg/display.kdl\"` to the main configuration, or run without --display-config to use the portable inline mode",
+                    self.config.managed_config_path().display(),
+                    self.config.main_config_path().display()
+                )));
+            }
             warnings.push(
-                "display.kdl is not included by the main niri configuration; changes may not take effect"
+                "the configured display file is not included by the main niri configuration; changes may not take effect"
                     .to_owned(),
             );
         }
