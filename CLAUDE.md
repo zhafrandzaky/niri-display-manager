@@ -25,6 +25,9 @@ outrank feature velocity. A bad change here can black-screen a laptop.
 - Adapters are injected (`NiriClient`, `HardwareProbe`, `ConfigStore`,
   `ProcessSupervisor`, `CommandRunner`); tests use the fakes in
   `tests/common/` and `src/service/display_service/tests.rs`.
+- Configuration targeting is dual-mode (modular included file or inline fenced
+  section) and resolved through `cli` + `service::config_paths`. Keep both
+  modes working when touching `ConfigStore` or the service pipeline.
 
 ## Memory-safety and failure discipline
 
@@ -63,6 +66,8 @@ outrank feature velocity. A bad change here can black-screen a laptop.
 ## Things that must never happen in a diff
 
 - Writing outside the managed KDL fence or deleting `display.kdl.bak`.
+- Writing to an explicitly configured display file that is not included by the
+  main configuration; the setup-required state must fail fast.
 - Skipping or weakening `niri validate`, verification polling, or rollback.
 - A profile that can disable every connected display.
 - Shell-string command execution with interpolated output names.

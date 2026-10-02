@@ -220,14 +220,38 @@ Verification record (final run):
 
 - `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, and
   `cargo test` are green.
-- Test suite: 63 unit tests, 8 integration tests, and 3 live-session tests
+- Test suite: 81 unit tests, 9 integration tests, and 3 live-session tests
   (read-only, run with `cargo test --test live_environment -- --ignored`).
 - Coverage (`cargo llvm-cov`, `main.rs` and the presentation layer excluded):
-  90.86 percent lines and 91.45 percent regions, with every measured file at or
+  92.48 percent lines and 92.61 percent regions, with every measured file at or
   above 80 percent lines.
 - Live checks: real `niri msg --json` outputs and windows parsed, real DRM sysfs
   probed, generated configurations accepted by the real `niri validate`, and
   the GUI window confirmed on the running compositor as
   `io.github.zyy.NiriDisplayManager`.
+- Discovery verified live: `--help`, `--print-paths` against the real modular
+  setup, a vanilla temporary configuration (inline mode), and an explicit
+  `--config` override.
 - Installer verified with a temporary prefix, including desktop entry
   validation and clean uninstall.
+
+## 10. Portability hardening (P0-P5, implemented)
+
+Dual-mode configuration management landed on top of the original design:
+
+- P0: the manager detects whether a dedicated display file is included by the
+  main configuration (full-path match, one level of indirection). Included:
+  modular mode, managed as before. Not included: portable inline mode, a fenced
+  section in the main `config.kdl` with its own `config.kdl.bak` snapshot.
+- P1/P4: main config resolution is `--config`, `$NIRI_CONFIG`,
+  `$NDM_CONFIG_DIR/niri/config.kdl`, `$XDG_CONFIG_HOME/niri/config.kdl`,
+  `$HOME/.config/niri/config.kdl`, with a typed `NoConfigBase` error instead of
+  a temporary-directory fallback. New CLI: `--config`, `--display-config`,
+  `--print-paths`, `--help`.
+- P2/P3: same-basename include false positives are prevented; an explicitly
+  configured but unregistered display file fails fast with a setup message
+  before any write; absent managed files no longer produce empty backup
+  artifacts.
+- P5: unit and integration tests cover vanilla and modular apply/rollback and
+  path resolution; `docs/PORTABILITY.md` records the architecture and the
+  compatibility matrix.

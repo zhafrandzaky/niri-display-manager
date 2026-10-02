@@ -7,10 +7,12 @@ this repository. Read it before editing code.
 
 `niri-display-manager` is a GTK4/libadwaita Rust application that manages
 display profiles for the niri Wayland compositor: internal only, extend
-left/right, HDMI mirroring through wl-mirror, and external-only. It targets
-CachyOS/Arch on hybrid-GPU laptops and manages a fenced section of
-`~/.config/niri/cfg/display.kdl` with automatic backup, validation, and
-rollback.
+left/right, HDMI mirroring through wl-mirror, and external-only. It runs on any
+distribution with niri, managing a fenced section either in a dedicated
+`cfg/display.kdl` that the main configuration includes (modular mode) or
+directly in the main `config.kdl` (portable inline mode), always with automatic
+backup, validation, and rollback. Path discovery and mode detection are
+documented in `docs/PORTABILITY.md`.
 
 ## Required commands
 
@@ -82,6 +84,10 @@ do require a niri session.
 
 - The manager may only write inside the managed KDL fence. Never rewrite,
   reorder, or reformat user content outside the fence markers.
+- Configuration writes go through `ConfigStore` in both modes (modular
+  `cfg/display.kdl` or inline `config.kdl`); never auto-inject `include`
+  directives. An explicitly configured but unregistered display file must fail
+  fast, not write silently.
 - Never delete `display.kdl.bak`; it is the user's pristine copy.
 - Never disable or bypass the `niri validate` gate, the post-reload
   verification, or the rollback path.

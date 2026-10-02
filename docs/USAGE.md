@@ -14,7 +14,7 @@ window.
 
 | Area | Meaning |
 |---|---|
-| Status | Current managed profile, mirror state, and an include warning if `display.kdl` is not registered in `config.kdl` |
+| Status | Current managed profile, mirror state, and the active configuration mode (modular or portable inline) |
 | Display Profiles | The five profiles; the active one carries a check mark |
 | Outputs | Every output niri reports, with mode, position, and scale |
 | Hardware Ports | Every DRM connector from `/sys/class/drm` with `card` and cable state |
@@ -65,8 +65,9 @@ If the projector shows nothing:
 
 ## Managing the backup
 
-- `~/.config/niri/cfg/display.kdl.bak` is created once, before the first
-  change, and is never overwritten by the manager.
+- A `.bak` of the managed file is created once, before the first change, and is
+  never overwritten by the manager: `cfg/display.kdl.bak` in modular mode,
+  `config.kdl.bak` in portable inline mode.
 - Internal Display Only restores this file exactly, then reloads niri.
 - If the backup is missing when Internal Only is selected, the manager removes
   its managed section instead; if neither exists, the operation is a no-op.
@@ -88,6 +89,9 @@ for status in /sys/class/drm/card*-*/status; do printf '%s: %s\n' "$status" "$(c
 
 # Validate a hand-written config change before applying it
 niri validate -c ~/.config/niri/config.kdl
+
+# Resolved configuration paths and the active mode
+niri-display-manager --print-paths
 
 # Verbose application logs
 RUST_LOG=debug niri-display-manager
@@ -142,5 +146,6 @@ cable-less paths):
 | "niri rejected the generated configuration" | The file was automatically restored; report the message with your `display.kdl` content |
 | "the mirror window did not appear" | wl-mirror exited immediately; run the printed command manually to see its error output |
 | Mirror window is on the panel instead of the projector | The manager moves it to the target and re-verifies; if it persists, check that the external output is enabled and not fullscreen on another workspace |
-| Profile applies but nothing changes | Check the include warning in the Status row; `config.kdl` must contain `include "./cfg/display.kdl"` |
+| "setup required" message | The file passed with `--display-config` is not included by `config.kdl`; add the include or run without `--display-config` to use portable inline mode |
+| Profile applies but nothing changes | Run `niri-display-manager --print-paths` and confirm the reported mode and files |
 | Active profile shows as "No managed profile applied" after edits | The `// profile:` comment in the managed section was removed; apply a profile again |

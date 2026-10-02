@@ -122,6 +122,12 @@ and the DRM port list. A read-only smoke test:
 timeout 5 niri-display-manager   # the window should appear; timeout closes it
 ```
 
+Configuration discovery can be checked without opening a window:
+
+```sh
+niri-display-manager --print-paths
+```
+
 Verbose logs for diagnostics:
 
 ```sh
@@ -135,9 +141,11 @@ RUST_LOG=debug niri-display-manager
 ```
 
 The manager never deletes your configuration. It only manages a fenced section
-inside `~/.config/niri/cfg/display.kdl` plus the one-time backup
-`display.kdl.bak`, which you may remove manually once you are sure the pristine
-copy is no longer needed.
+in the active managed file (a dedicated `cfg/display.kdl` in modular mode, or
+the main `config.kdl` in portable inline mode) plus the one-time backup
+(`.bak` next to that file), which you may remove manually once you are sure the
+pristine copy is no longer needed. Run `niri-display-manager --print-paths` to
+see exactly which files are in use.
 
 ## Troubleshooting
 
@@ -152,4 +160,5 @@ copy is no longer needed.
 | Icon missing in menus | Re-run `gtk-update-icon-cache -f -t ~/.local/share/icons/hicolor`; both the scalable SVG and the 128x128 PNG are installed |
 | Mirror profile reports wl-mirror missing | `sudo pacman -S wl-mirror` |
 | HDMI output on the NVIDIA card is not detected | Ensure `nvidia_drm.modeset=1` is set in your kernel parameters and reboot |
+| Profiles have no effect | Run `niri-display-manager --print-paths`; the manager adapts to modular and single-file layouts automatically, so this usually indicates a custom `$NIRI_CONFIG` path; pass `--config` or check the reported mode |
 | `niri validate` reports the generated file | Open an issue with the content of `display.kdl`; the manager rolls back automatically and never leaves an invalid file active |

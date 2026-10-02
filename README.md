@@ -14,10 +14,11 @@ HDMI ports are split across `card0` and `card1`.
 | Feature | Description |
 |---|---|
 | Five display profiles | Internal only, Extend right, Extend left, Mirror / Presentation, External only |
-| Persisted layouts | Profiles are written to `~/.config/niri/cfg/display.kdl` and survive restarts |
+| Persisted layouts | Profiles are written to the niri configuration and survive restarts |
+| Portable dual-mode | Uses a modular `cfg/display.kdl` when it is included, otherwise manages a fenced section in the main `config.kdl` |
 | Instant application | Each apply reloads niri through `niri msg action load-config-file` |
 | Verified apply | Output state is polled after reload; failures trigger an automatic rollback |
-| Pristine backup | `display.kdl.bak` is created once before the first change and restores idempotently |
+| Pristine backup | A `.bak` of the managed file is created once before the first change and restores idempotently |
 | Validate before load | Generated configuration passes `niri validate` before niri ever sees it |
 | HDMI mirroring | `wl-mirror` is spawned with `--fullscreen-output`, supervised, and stopped with SIGTERM |
 | Multi-GPU aware | Reads `/sys/class/drm` so a cable on either GPU is detected |
@@ -50,8 +51,9 @@ niri-display-manager
 ```
 
 See `docs/INSTALLATION.md` for a complete installation guide, `docs/USAGE.md`
-for operating instructions and diagnostics, and `docs/ARCHITECTURE.md` for the
-internal design.
+for operating instructions and diagnostics, `docs/ARCHITECTURE.md` for the
+internal design, and `docs/PORTABILITY.md` for configuration discovery across
+distributions and niri layouts.
 
 ## How it works
 
@@ -76,8 +78,9 @@ niri msg action load-config-file -> verify observed layout
 success, or automatic rollback to the pristine snapshot
 ```
 
-The manager never rewrites user configuration. It owns a fenced section inside
-`~/.config/niri/cfg/display.kdl`:
+The manager never rewrites user configuration. It owns a fenced section in a
+dedicated `cfg/display.kdl` when that file is included by the main config
+(modular mode), and directly in `config.kdl` otherwise (portable inline mode):
 
 ```kdl
 // >>> niri-display-manager: managed section - manual edits will be overwritten
@@ -94,19 +97,37 @@ output "HDMI-A-1" {
 
 Everything outside the fence is preserved byte for byte.
 
+## Configuration discovery
+
+The main configuration is resolved, highest precedence first, from `--config`,
+`$NIRI_CONFIG`, `$NDM_CONFIG_DIR/niri/config.kdl`,
+`$XDG_CONFIG_HOME/niri/config.kdl`, then `$HOME/.config/niri/config.kdl`. The
+display target defaults to `<main config directory>/cfg/display.kdl` and can be
+overridden with `--display-config`. Mode detection, include handling, and the
+compatibility matrix are documented in `docs/PORTABILITY.md`.
+
+```text
+$ niri-display-manager --print-paths
+mode:          inline (managed section in the main configuration)
+main config:   /home/user/.config/niri/config.kdl
+managed file:  /home/user/.config/niri/config.kdl
+backup:        /home/user/.config/niri/config.kdl.bak
+```
+
 ## Project layout
 
 ```text
 src/
-├── main.rs                  entry point and logging
+├── main.rs                  entry point, logging, and CLI entry
 ├── lib.rs                   module root and lint policy
+├── cli.rs                   command-line options and help text
 ├── domain/                  pure entities and layout rules (no I/O)
-├── service/                 application use cases and rollback pipeline
+├── service/                 use cases, path discovery, rollback pipeline
 ├── infrastructure/          niri IPC, DRM sysfs, KDL fence, process supervision
 └── presentation/            GTK4 / libadwaita UI and worker wiring
 data/                        desktop entry, scalable SVG, and 128x128 PNG icon
 tests/                       integration and live-environment tests
-docs/                        architecture, installation, usage, plan
+docs/                        architecture, portability, installation, usage, plan
 ```
 
 ## Development

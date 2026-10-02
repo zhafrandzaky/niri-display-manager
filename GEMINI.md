@@ -32,6 +32,10 @@ When you are asked to change something here, first read:
   - `niri validate -c <path>`
 - Output JSON fields used: `name`, `modes[]`, `current_mode`, `logical`
   (`x`, `y`, `width`, `height`, `scale`), `vrr_supported`.
+- Configuration discovery: `--config`, `$NIRI_CONFIG`, `$NDM_CONFIG_DIR`,
+  `$XDG_CONFIG_HOME`, `$HOME/.config`; modes: modular (included
+  `cfg/display.kdl`) or inline (fenced section in `config.kdl`); see
+  `docs/PORTABILITY.md`.
 - Window JSON has no fullscreen flag; mirror verification checks placement via
   workspace -> output mapping instead.
 - The managed KDL fence is delimited by `// >>> niri-display-manager: managed
