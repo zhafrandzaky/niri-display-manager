@@ -1,6 +1,6 @@
 # niri-display-manager
 
-A production-grade GTK4/libadwaita display manager for the [niri](https://github.com/YaLTeR/niri)
+A production-grade GTK4/libadwaita display manager for the [niri](https://github.com/niri-wm/niri)
 Wayland compositor. It switches between laptop, extended, mirrored, and
 projector-only display setups, persists them to the niri configuration, and
 rolls back automatically if the compositor rejects a change.
@@ -143,6 +143,10 @@ sysfs, and validate generated configurations in a temporary directory.
 - Positions are managed globally: applying a profile may override manual output
   positions, which is the intended contract of the managed section.
 
+## Author
+
+- **zhafrandzaky** ([@zhafrandzaky](https://github.com/zhafrandzaky))
+
 ## License
 
-MIT. See `LICENSE`.
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
