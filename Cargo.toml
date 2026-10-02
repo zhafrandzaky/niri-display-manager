@@ -1,0 +1,20 @@
+[package]
+name = "niri-display-manager"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.104"
+async-channel = "2.5.0"
+env_logger = "0.11.11"
+glib = { version = "0.22.10", features = ["futures"] }
+gtk4 = { version = "0.11.5", features = ["v4_22"] }
+adw = { package = "libadwaita", version = "0.9.2", features = ["v1_9", "gtk_v4_22"] }
+log = "0.4.34"
+nix = { version = "0.31.3", features = ["signal", "process"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+thiserror = "2.0.21"
+
+[dev-dependencies]
+tempfile = "3.27.0"
