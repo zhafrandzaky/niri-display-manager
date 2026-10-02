@@ -17,7 +17,7 @@ use niri_display_manager::domain::profile::{self, PlanError, ProfileKind};
 use niri_display_manager::infrastructure::kdl_parser;
 use niri_display_manager::infrastructure::niri_ipc::{WindowInfo, WorkspaceInfo};
 use niri_display_manager::infrastructure::process_runner::MirrorPidFile;
-use niri_display_manager::service::backup_service::{ConfigStore, FileConfigStore};
+use niri_display_manager::service::backup_service::{ConfigMode, ConfigStore, FileConfigStore};
 use niri_display_manager::service::display_service::{DisplayService, ServiceError};
 
 type Service = DisplayService<FakeNiri, FakeProbe, FileConfigStore, FakeSupervisor>;
@@ -40,9 +40,9 @@ fn make_service(
 }
 
 fn prepare_store(directory: &tempfile::TempDir, display: &str) -> FileConfigStore {
-    let config = store(directory.path());
-    fs::create_dir_all(config.display_config_path().parent().unwrap()).unwrap();
-    fs::write(config.display_config_path(), display).unwrap();
+    let config = store(directory.path(), ConfigMode::Modular);
+    fs::create_dir_all(config.managed_config_path().parent().unwrap()).unwrap();
+    fs::write(config.managed_config_path(), display).unwrap();
     fs::write(config.main_config_path(), "include \"./cfg/display.kdl\"\n").unwrap();
     config
 }
@@ -70,7 +70,7 @@ fn extend_right_writes_managed_section_and_pristine_backup() {
     let report = service.apply_profile(ProfileKind::ExtendRight).unwrap();
     assert_eq!(report.profile, ProfileKind::ExtendRight);
 
-    let written = fs::read_to_string(config.display_config_path()).unwrap();
+    let written = fs::read_to_string(config.managed_config_path()).unwrap();
     assert!(written.starts_with("// user config\n"));
     assert!(written.contains("// profile: extend-right"));
     assert!(written.contains("output \"HDMI-A-1\" {"));
@@ -102,7 +102,7 @@ fn internal_only_reset_restores_the_pristine_file() {
         .unwrap();
     assert!(
         config
-            .read_display_config()
+            .read_managed_config()
             .unwrap()
             .contains("managed section")
     );
@@ -120,7 +120,7 @@ fn internal_only_reset_restores_the_pristine_file() {
 
     service.apply_profile(ProfileKind::InternalOnly).unwrap();
     assert_eq!(
-        fs::read_to_string(config.display_config_path()).unwrap(),
+        fs::read_to_string(config.managed_config_path()).unwrap(),
         original
     );
 }
@@ -144,7 +144,7 @@ fn extend_without_a_cable_persists_and_does_not_fail_verification() {
     assert_eq!(report.warnings.len(), 1);
     assert!(report.warnings[0].contains("no cable attached"));
 
-    let written = fs::read_to_string(config.display_config_path()).unwrap();
+    let written = fs::read_to_string(config.managed_config_path()).unwrap();
     assert!(written.contains("output \"HDMI-A-1\" {"));
     assert!(written.contains("position x=1920 y=0"));
 }
@@ -170,7 +170,7 @@ fn external_only_is_refused_without_a_connected_display() {
         ServiceError::Plan(PlanError::ExternalNotConnected)
     ));
     assert_eq!(
-        fs::read_to_string(config.display_config_path()).unwrap(),
+        fs::read_to_string(config.managed_config_path()).unwrap(),
         "// user config\n"
     );
     assert!(!directory.path().join("niri/cfg/display.kdl.bak").exists());
@@ -216,4 +216,45 @@ fn mirror_flow_spawns_wl_mirror_and_records_the_pid() {
 
     service.stop_mirror().unwrap();
     assert_eq!(pid_file.read().unwrap(), None);
+}
+
+#[test]
+fn vanilla_single_config_uses_inline_mode_and_restores_it() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = store(directory.path(), ConfigMode::Inline);
+    let original = "// vanilla niri config\noutput \"DP-1\" {\n    scale 2\n}\n";
+    fs::create_dir_all(config.main_config_path().parent().unwrap()).unwrap();
+    fs::write(config.main_config_path(), original).unwrap();
+
+    let base = vec![
+        enabled_output("eDP-1", 1920),
+        enabled_output("HDMI-A-1", 2560),
+    ];
+    let plan = profile::plan_profile(ProfileKind::ExtendRight, &base, &[]).unwrap();
+    let pending = realize(&plan, &base);
+    let service = make_service(
+        FakeNiri::new(base).with_pending(pending),
+        vec![],
+        config.clone(),
+        FakeSupervisor::default(),
+        &directory,
+    );
+
+    let report = service.apply_profile(ProfileKind::ExtendRight).unwrap();
+    assert_eq!(report.profile, ProfileKind::ExtendRight);
+    assert!(report.warnings.is_empty());
+
+    let written = fs::read_to_string(config.main_config_path()).unwrap();
+    assert!(written.starts_with(original));
+    assert!(written.contains("// profile: extend-right"));
+    assert!(written.contains("output \"HDMI-A-1\" {"));
+
+    let backup = directory.path().join("niri/config.kdl.bak");
+    assert_eq!(fs::read_to_string(&backup).unwrap(), original);
+
+    service.apply_profile(ProfileKind::InternalOnly).unwrap();
+    assert_eq!(
+        fs::read_to_string(config.main_config_path()).unwrap(),
+        original
+    );
 }

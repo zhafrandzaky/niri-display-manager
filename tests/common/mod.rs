@@ -17,7 +17,7 @@ use niri_display_manager::infrastructure::niri_ipc::{
 use niri_display_manager::infrastructure::process_runner::{
     CommandSpec, ProcessError, ProcessSupervisor,
 };
-use niri_display_manager::service::backup_service::FileConfigStore;
+use niri_display_manager::service::backup_service::{ConfigMode, FileConfigStore};
 
 #[derive(Default)]
 struct NiriState {
@@ -227,11 +227,15 @@ impl ProcessSupervisor for FakeSupervisor {
 }
 
 /// Build a real filesystem-backed config store inside a temporary directory.
-pub fn store(root: &Path) -> FileConfigStore {
-    FileConfigStore::new(
-        root.join("niri/cfg/display.kdl"),
-        root.join("niri/cfg/display.kdl.bak"),
+///
+/// `mode` selects between the modular layout (managed `cfg/display.kdl`) and
+/// the inline layout (managed section in `config.kdl`).
+pub fn store(root: &Path, mode: ConfigMode) -> FileConfigStore {
+    FileConfigStore::for_layout(
+        mode,
         root.join("niri/config.kdl"),
+        root.join("niri/cfg/display.kdl"),
+        None,
     )
 }
 

@@ -11,7 +11,7 @@ use common::store;
 use niri_display_manager::domain::display::OutputId;
 use niri_display_manager::domain::profile::{LayoutPlan, OutputPlan, ProfileKind};
 use niri_display_manager::infrastructure::kdl_parser;
-use niri_display_manager::service::backup_service::ConfigStore;
+use niri_display_manager::service::backup_service::{ConfigMode, ConfigStore};
 
 const USER_CONFIG: &str = r#"// User display configuration.
 // Keep every comment and blank line below intact.
@@ -50,9 +50,9 @@ fn plan(profile: ProfileKind, external_x: i32) -> LayoutPlan {
 #[test]
 fn repeated_writes_replace_a_single_section_and_preserve_user_content() {
     let directory = tempfile::tempdir().unwrap();
-    let config = store(directory.path());
-    fs::create_dir_all(config.display_config_path().parent().unwrap()).unwrap();
-    fs::write(config.display_config_path(), USER_CONFIG).unwrap();
+    let config = store(directory.path(), ConfigMode::Modular);
+    fs::create_dir_all(config.managed_config_path().parent().unwrap()).unwrap();
+    fs::write(config.managed_config_path(), USER_CONFIG).unwrap();
 
     config.snapshot().unwrap();
     config
@@ -68,7 +68,7 @@ fn repeated_writes_replace_a_single_section_and_preserve_user_content() {
         )))
         .unwrap();
 
-    let written = fs::read_to_string(config.display_config_path()).unwrap();
+    let written = fs::read_to_string(config.managed_config_path()).unwrap();
     assert!(written.starts_with(USER_CONFIG));
     assert_eq!(written.matches(kdl_parser::BEGIN_MARKER).count(), 1);
     assert_eq!(written.matches(kdl_parser::END_MARKER).count(), 1);
@@ -81,9 +81,9 @@ fn repeated_writes_replace_a_single_section_and_preserve_user_content() {
 #[test]
 fn restore_returns_the_file_to_its_exact_original_bytes() {
     let directory = tempfile::tempdir().unwrap();
-    let config = store(directory.path());
-    fs::create_dir_all(config.display_config_path().parent().unwrap()).unwrap();
-    fs::write(config.display_config_path(), USER_CONFIG).unwrap();
+    let config = store(directory.path(), ConfigMode::Modular);
+    fs::create_dir_all(config.managed_config_path().parent().unwrap()).unwrap();
+    fs::write(config.managed_config_path(), USER_CONFIG).unwrap();
 
     config.snapshot().unwrap();
     config
@@ -93,20 +93,20 @@ fn restore_returns_the_file_to_its_exact_original_bytes() {
         )))
         .unwrap();
     assert_ne!(
-        fs::read_to_string(config.display_config_path()).unwrap(),
+        fs::read_to_string(config.managed_config_path()).unwrap(),
         USER_CONFIG
     );
 
     config.restore_snapshot().unwrap();
     assert_eq!(
-        fs::read_to_string(config.display_config_path()).unwrap(),
+        fs::read_to_string(config.managed_config_path()).unwrap(),
         USER_CONFIG
     );
 
     // Idempotent: restoring again keeps the file identical.
     config.restore_snapshot().unwrap();
     assert_eq!(
-        fs::read_to_string(config.display_config_path()).unwrap(),
+        fs::read_to_string(config.managed_config_path()).unwrap(),
         USER_CONFIG
     );
 }
@@ -114,9 +114,9 @@ fn restore_returns_the_file_to_its_exact_original_bytes() {
 #[test]
 fn manual_edits_outside_the_fence_survive_manager_writes() {
     let directory = tempfile::tempdir().unwrap();
-    let config = store(directory.path());
-    fs::create_dir_all(config.display_config_path().parent().unwrap()).unwrap();
-    fs::write(config.display_config_path(), USER_CONFIG).unwrap();
+    let config = store(directory.path(), ConfigMode::Modular);
+    fs::create_dir_all(config.managed_config_path().parent().unwrap()).unwrap();
+    fs::write(config.managed_config_path(), USER_CONFIG).unwrap();
 
     config
         .write_managed_section(&kdl_parser::render_section(&plan(
@@ -126,12 +126,12 @@ fn manual_edits_outside_the_fence_survive_manager_writes() {
         .unwrap();
 
     // The user edits their own part of the file after the manager wrote.
-    let current = fs::read_to_string(config.display_config_path()).unwrap();
+    let current = fs::read_to_string(config.managed_config_path()).unwrap();
     let edited = current.replace(
         "// A trailing note.",
         "// A trailing note edited by the user.",
     );
-    fs::write(config.display_config_path(), &edited).unwrap();
+    fs::write(config.managed_config_path(), &edited).unwrap();
 
     config
         .write_managed_section(&kdl_parser::render_section(&plan(
@@ -140,7 +140,7 @@ fn manual_edits_outside_the_fence_survive_manager_writes() {
         )))
         .unwrap();
 
-    let final_contents = fs::read_to_string(config.display_config_path()).unwrap();
+    let final_contents = fs::read_to_string(config.managed_config_path()).unwrap();
     assert!(final_contents.contains("// A trailing note edited by the user."));
     assert_eq!(final_contents.matches(kdl_parser::BEGIN_MARKER).count(), 1);
     assert!(final_contents.contains("// profile: extend-left"));
