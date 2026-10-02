@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Niri Display Manager
+GenericName=Display Configuration
+Comment=Manage niri display profiles, monitor layout, and HDMI mirroring
+Exec=niri-display-manager
+Icon=niri-display-manager
+Terminal=false
+Categories=Settings;HardwareSettings;
+Keywords=niri;display;monitor;mirror;hdmi;projector;screen;wayland;
+StartupNotify=true
+StartupWMClass=io.github.zyy.NiriDisplayManager
