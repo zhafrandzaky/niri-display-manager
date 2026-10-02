@@ -1,0 +1,35 @@
+{
+  "eDP-1": {
+    "name": "eDP-1",
+    "make": "AU Optronics",
+    "model": "0x7EAD",
+    "serial": "0x00007EAD",
+    "physical_size": [340, 190],
+    "modes": [
+      {
+        "width": 1920,
+        "height": 1080,
+        "refresh_rate": 144001,
+        "is_preferred": true
+      },
+      {
+        "width": 1920,
+        "height": 1080,
+        "refresh_rate": 60001,
+        "is_preferred": true
+      }
+    ],
+    "current_mode": 0,
+    "is_custom_mode": false,
+    "vrr_supported": true,
+    "vrr_enabled": false,
+    "logical": {
+      "x": 0,
+      "y": 0,
+      "width": 1920,
+      "height": 1080,
+      "scale": 1.0,
+      "transform": "Normal"
+    }
+  }
+}
