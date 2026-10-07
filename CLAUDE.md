@@ -36,7 +36,7 @@ outrank feature velocity. A bad change here can black-screen a laptop.
   recoverable condition into a typed error.
 - Prefer let-chains and early returns; clippy's `-D warnings` gate is part of
   the contract.
-- Bounded operations only: 5 s command timeouts, 3 s verification polling,
+- Bounded operations only: 5 s command timeouts, 5 s verification polling,
   2 s mirror termination grace. Do not introduce unbounded waits.
 
 ## TDD workflow for this repo

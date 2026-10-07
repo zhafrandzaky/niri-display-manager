@@ -88,7 +88,7 @@ no knowledge of niri, GTK, sysfs, or the filesystem.
    section and splice it into `display.kdl`.
 6. Gate the new file through `niri validate -c <config.kdl>`.
 7. Reload with `niri msg action load-config-file`.
-8. Poll outputs (default 30 attempts x 100 ms) and compare against the plan
+8. Poll outputs (default 50 attempts x 100 ms, 5 s) and compare against the plan
    with `verify_plan`. Mismatches describe the exact output and coordinates.
 9. Apply focus (`focus-monitor`), and for Mirror spawn `wl-mirror` with
    `--fullscreen-output <target> <source>`, record the pid, then verify the
@@ -106,7 +106,9 @@ apply Mirror
    +-- spawn wl-mirror --fullscreen-output <target> <source>
    +-- write pid to $XDG_RUNTIME_DIR/niri-display-manager.mirror.pid
    +-- poll niri windows/workspaces until the wl-mirror window is on <target>
-   |      fallback: move-window-to-monitor --id + focus-window --id
+   |      the window is matched by child pid, then by the app id
+   |      `at.yrlf.wl_mirror` (or `wl-mirror` on older releases)
+   |      fallback placement: move-window-to-monitor --id + focus-window --id
    +-- on failure: terminate child, remove pid file, rollback layout
 
 stop / switch away / reset
@@ -119,7 +121,9 @@ startup
 niri's `Window` structure (niri-ipc 26.4) does not expose a fullscreen flag, so
 the manager does not blindly toggle fullscreen. It relies on wl-mirror's own
 `--fullscreen-output` request and verifies placement instead, which avoids
-accidentally unfullscreening an already correct window.
+accidentally unfullscreening an already correct window. wl-mirror output is
+captured to `$XDG_RUNTIME_DIR/niri-display-manager-mirror.log`, and failure
+messages reference that file.
 
 ## Managed KDL section
 
@@ -200,7 +204,7 @@ equivalent is used instead: `async-channel` for transport and
 is unchanged: no blocking I/O runs on the UI thread.
 
 Long operations are bounded: niri commands have a 5 s timeout, layout
-verification polls for at most 3 s, and mirror termination allows 2 s before
+verification polls for at most 5 s, and mirror termination allows 2 s before
 SIGKILL.
 
 ## Error model

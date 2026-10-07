@@ -144,7 +144,8 @@ cable-less paths):
 | "no external display is connected" | The cable is not attached; connect it and press Refresh |
 | "the external display is not available in niri yet" | The port is connected but niri has not adopted it; press Refresh, then retry |
 | "niri rejected the generated configuration" | The file was automatically restored; report the message with your `display.kdl` content |
-| "the mirror window did not appear" | wl-mirror exited immediately; run the printed command manually to see its error output |
+| "the mirror window did not appear" | Check `$XDG_RUNTIME_DIR/niri-display-manager-mirror.log`; wl-mirror writes its errors and capture-backend fallbacks there. The manager matches the window by pid and by the app id `at.yrlf.wl_mirror` |
+| "wl-mirror exited immediately" | Read the same log file; the failure message includes its path |
 | Mirror window is on the panel instead of the projector | The manager moves it to the target and re-verifies; if it persists, check that the external output is enabled and not fullscreen on another workspace |
 | "setup required" message | The file passed with `--display-config` is not included by `config.kdl`; add the include or run without `--display-config` to use portable inline mode |
 | Profile applies but nothing changes | Run `niri-display-manager --print-paths` and confirm the reported mode and files |
