@@ -14,6 +14,7 @@
 //! All external effects go through the injected [`NiriClient`],
 //! [`HardwareProbe`], [`ConfigStore`], and [`ProcessSupervisor`] traits.
 
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use super::backup_service::{ConfigError, ConfigMode, ConfigStore};
@@ -82,7 +83,7 @@ pub struct VerificationPolicy {
 impl Default for VerificationPolicy {
     fn default() -> Self {
         Self {
-            attempts: 30,
+            attempts: 50,
             interval: Duration::from_millis(100),
         }
     }
@@ -214,7 +215,10 @@ where
         }
         if profile == ProfileKind::Mirror {
             let mirror_plan = profile::plan_mirror(&outputs)?;
-            self.start_mirror(&mirror_plan)?;
+            if let Err(error) = self.start_mirror(&mirror_plan) {
+                self.rollback();
+                return Err(error);
+            }
         }
 
         Ok(ApplyReport {
@@ -273,13 +277,15 @@ where
     }
 
     fn start_mirror(&self, plan: &MirrorPlan) -> Result<(), ServiceError> {
-        let spec = CommandSpec::new(MirrorPlan::program(), plan.command_args());
+        let log_path = self.mirror_log_path();
+        let spec = CommandSpec::new(MirrorPlan::program(), plan.command_args())
+            .with_log_path(log_path.clone());
         let pid = self.supervisor.spawn(&spec)?;
         if let Err(error) = self.pid_file.write(pid) {
             let _ = self.supervisor.terminate(MIRROR_TERMINATION_GRACE);
             return Err(ServiceError::Process(error));
         }
-        if let Err(error) = self.verify_mirror_window(plan) {
+        if let Err(error) = self.verify_mirror_window(plan, pid, &log_path) {
             let _ = self.supervisor.terminate(MIRROR_TERMINATION_GRACE);
             let _ = self.pid_file.remove();
             return Err(error);
@@ -287,20 +293,31 @@ where
         Ok(())
     }
 
-    fn verify_mirror_window(&self, plan: &MirrorPlan) -> Result<(), ServiceError> {
+    /// Log file capturing wl-mirror output for diagnostics.
+    fn mirror_log_path(&self) -> PathBuf {
+        self.pid_file
+            .path()
+            .with_file_name("niri-display-manager-mirror.log")
+    }
+
+    fn verify_mirror_window(
+        &self,
+        plan: &MirrorPlan,
+        child_pid: u32,
+        log_path: &Path,
+    ) -> Result<(), ServiceError> {
         let mut last_detail = String::from("mirror window did not appear");
         let attempts = self.verification.attempts.max(1);
         for attempt in 0..attempts {
             if !self.supervisor.is_running()? {
                 return Err(ServiceError::MirrorFailed {
                     target: plan.target.to_string(),
-                    detail: "wl-mirror exited immediately (check wl-mirror compositor support)"
-                        .to_owned(),
+                    detail: format!("wl-mirror exited immediately; see {}", log_path.display()),
                 });
             }
             let windows = self.niri.windows()?;
             let workspaces = self.niri.workspaces()?;
-            if let Some(window) = find_mirror_window(&windows) {
+            if let Some(window) = find_mirror_window(&windows, child_pid) {
                 match window_output(window, &workspaces).as_deref() {
                     Some(output) if output == plan.target.as_str() => return Ok(()),
                     Some(output) => {
@@ -320,18 +337,38 @@ where
         }
         Err(ServiceError::MirrorFailed {
             target: plan.target.to_string(),
-            detail: last_detail,
+            detail: format!("{last_detail}; see {}", log_path.display()),
         })
     }
 }
 
-fn find_mirror_window(windows: &[WindowInfo]) -> Option<&WindowInfo> {
-    windows.iter().find(|window| {
-        window
-            .app_id
-            .as_deref()
-            .is_some_and(|app_id| app_id.contains("wl-mirror"))
-    })
+/// Whether a window belongs to the wl-mirror child started by this manager.
+///
+/// Matching prefers the child pid (exact, immune to app-id spelling changes)
+/// and falls back to the known app-id spellings: wl-mirror reports
+/// `at.yrlf.wl_mirror` on current releases while older builds used
+/// `wl-mirror`.
+pub fn is_mirror_window(window: &WindowInfo, child_pid: u32) -> bool {
+    if window
+        .pid
+        .is_some_and(|pid| u32::try_from(pid).is_ok_and(|pid| pid == child_pid))
+    {
+        return true;
+    }
+    window
+        .app_id
+        .as_deref()
+        .is_some_and(|app_id| normalize_identifier(app_id).contains("wl_mirror"))
+}
+
+fn normalize_identifier(value: &str) -> String {
+    value.to_ascii_lowercase().replace('-', "_")
+}
+
+fn find_mirror_window(windows: &[WindowInfo], child_pid: u32) -> Option<&WindowInfo> {
+    windows
+        .iter()
+        .find(|window| is_mirror_window(window, child_pid))
 }
 
 fn window_output(window: &WindowInfo, workspaces: &[WorkspaceInfo]) -> Option<String> {

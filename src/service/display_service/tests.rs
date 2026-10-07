@@ -85,11 +85,23 @@ impl NiriClient for FakeNiri {
     }
 
     fn move_window_to_output(&self, window_id: u64, output: &OutputId) -> Result<(), NiriError> {
-        self.state
-            .lock()
-            .unwrap()
+        let mut state = self.state.lock().unwrap();
+        state
             .calls
             .push(format!("move_window_to_output {window_id} {output}"));
+        let workspace_id = state
+            .windows
+            .iter()
+            .find(|window| window.id == window_id)
+            .and_then(|window| window.workspace_id);
+        if let Some(workspace_id) = workspace_id
+            && let Some(workspace) = state
+                .workspaces
+                .iter_mut()
+                .find(|workspace| workspace.id == workspace_id)
+        {
+            workspace.output = Some(output.as_str().to_owned());
+        }
         Ok(())
     }
 
@@ -507,8 +519,9 @@ fn make_service(
 fn mirror_window() -> WindowInfo {
     WindowInfo {
         id: 7,
-        title: Some("Wayland Mirror".to_owned()),
-        app_id: Some("wl-mirror".to_owned()),
+        title: Some("Wayland Output Mirror for eDP-1".to_owned()),
+        app_id: Some("at.yrlf.wl_mirror".to_owned()),
+        pid: Some(4242),
         workspace_id: Some(1),
         is_focused: false,
     }
@@ -706,6 +719,72 @@ fn mirror_apply_fails_and_stops_the_child_when_no_window_appears() {
     assert_eq!(fixture.supervisor.state.lock().unwrap().terminations, 1);
     let pid_file = MirrorPidFile::new(&fixture.pid_path);
     assert_eq!(pid_file.read().unwrap(), None);
+    // A failed mirror start rolls the layout back like any other failure.
+    assert_eq!(fixture.config.display(), "// user config\n");
+}
+
+#[test]
+fn mirror_window_matching_accepts_pid_and_app_id_spellings() {
+    let real = WindowInfo {
+        id: 1,
+        title: None,
+        app_id: Some("at.yrlf.wl_mirror".to_owned()),
+        pid: Some(100),
+        workspace_id: None,
+        is_focused: false,
+    };
+    // Exact child pid wins even if the app id were unknown.
+    assert!(is_mirror_window(&real, 100));
+    // Current wl-mirror app id matches without a pid.
+    assert!(is_mirror_window(&real, 999));
+
+    let legacy = WindowInfo {
+        app_id: Some("wl-mirror".to_owned()),
+        pid: None,
+        ..real.clone()
+    };
+    assert!(is_mirror_window(&legacy, 999));
+
+    let unrelated = WindowInfo {
+        app_id: Some("firefox".to_owned()),
+        pid: None,
+        ..real
+    };
+    assert!(!is_mirror_window(&unrelated, 999));
+}
+
+#[test]
+fn mirror_window_is_moved_to_the_target_output() {
+    let base = vec![
+        enabled_output("eDP-1", 1920),
+        enabled_output("HDMI-A-1", 2560),
+    ];
+    let layout = profile::plan_profile(ProfileKind::Mirror, &base, &[]).unwrap();
+    let pending = realize(&layout, &base);
+    let fixture = make_service(
+        FakeNiri::new(base).with_pending(pending).with_windows(
+            vec![mirror_window()],
+            vec![WorkspaceInfo {
+                id: 1,
+                name: None,
+                output: Some("eDP-1".to_owned()),
+                is_active: true,
+            }],
+        ),
+        vec![],
+        FakeConfig::with_display("// user config\n"),
+        FakeSupervisor::default(),
+    );
+
+    fixture.service.apply_profile(ProfileKind::Mirror).unwrap();
+    let calls = fixture.niri.calls();
+    assert!(
+        calls
+            .iter()
+            .any(|call| call == "move_window_to_output 7 HDMI-A-1"),
+        "expected the window to be moved: {calls:?}"
+    );
+    assert!(calls.iter().any(|call| call == "focus_window 7"));
 }
 
 #[test]

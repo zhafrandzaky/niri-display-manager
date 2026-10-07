@@ -192,8 +192,9 @@ fn mirror_flow_spawns_wl_mirror_and_records_the_pid() {
         FakeNiri::new(base).with_pending(pending).with_windows(
             vec![WindowInfo {
                 id: 7,
-                title: Some("Wayland Mirror".to_owned()),
-                app_id: Some("wl-mirror".to_owned()),
+                title: Some("Wayland Output Mirror for eDP-1".to_owned()),
+                app_id: Some("at.yrlf.wl_mirror".to_owned()),
+                pid: Some(4242),
                 workspace_id: Some(1),
                 is_focused: false,
             }],

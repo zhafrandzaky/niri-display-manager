@@ -36,6 +36,8 @@ pub struct WindowInfo {
     #[serde(default)]
     pub app_id: Option<String>,
     #[serde(default)]
+    pub pid: Option<i32>,
+    #[serde(default)]
     pub workspace_id: Option<u64>,
     #[serde(default)]
     pub is_focused: bool,
@@ -278,7 +280,7 @@ mod tests {
     #[test]
     fn parses_windows_and_workspaces() {
         let windows_json = r#"[
-            {"id": 7, "title": "Wayland Mirror", "app_id": "wl-mirror", "workspace_id": 1, "is_focused": true}
+            {"id": 7, "title": "Wayland Output Mirror for eDP-1", "app_id": "at.yrlf.wl_mirror", "pid": 4558, "workspace_id": 1, "is_focused": true}
         ]"#;
         let workspaces_json = r#"[
             {"id": 1, "name": null, "output": "HDMI-A-1", "is_active": true}
@@ -288,7 +290,8 @@ mod tests {
             (true, workspaces_json.to_owned(), String::new()),
         ]);
         let windows = client.windows().unwrap();
-        assert_eq!(windows[0].app_id.as_deref(), Some("wl-mirror"));
+        assert_eq!(windows[0].app_id.as_deref(), Some("at.yrlf.wl_mirror"));
+        assert_eq!(windows[0].pid, Some(4558));
         assert_eq!(windows[0].workspace_id, Some(1));
         let workspaces = client.workspaces().unwrap();
         assert_eq!(workspaces[0].output.as_deref(), Some("HDMI-A-1"));

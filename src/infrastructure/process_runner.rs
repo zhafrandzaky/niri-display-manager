@@ -55,6 +55,8 @@ pub struct CommandSpec {
     pub program: String,
     pub args: Vec<String>,
     pub timeout: Duration,
+    /// Optional file capturing the child's stdout and stderr.
+    pub log_path: Option<std::path::PathBuf>,
 }
 
 impl CommandSpec {
@@ -63,11 +65,21 @@ impl CommandSpec {
             program: program.into(),
             args,
             timeout: Duration::from_secs(10),
+            log_path: None,
         }
     }
 
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
+        self
+    }
+
+    /// Redirect the child's stdout and stderr into `path`.
+    ///
+    /// Used for the supervised wl-mirror process so mirror failures stay
+    /// diagnosable (`$XDG_RUNTIME_DIR/niri-display-manager-mirror.log`).
+    pub fn with_log_path(mut self, path: impl Into<std::path::PathBuf>) -> Self {
+        self.log_path = Some(path.into());
         self
     }
 }
@@ -163,16 +175,25 @@ impl ProcessSupervisor for SystemSupervisor {
             let _ = existing.kill();
             let _ = existing.wait();
         }
-        let child = Command::new(&spec.program)
-            .args(&spec.args)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|source| ProcessError::Spawn {
-                program: spec.program.clone(),
-                source,
-            })?;
+
+        let mut command = Command::new(&spec.program);
+        command.args(&spec.args).stdin(Stdio::null());
+        if let Some(log_path) = &spec.log_path {
+            if let Some(parent) = log_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let log_file = std::fs::File::create(log_path)?;
+            let log_clone = log_file.try_clone()?;
+            command.stdout(Stdio::from(log_file));
+            command.stderr(Stdio::from(log_clone));
+        } else {
+            command.stdout(Stdio::null()).stderr(Stdio::null());
+        }
+
+        let child = command.spawn().map_err(|source| ProcessError::Spawn {
+            program: spec.program.clone(),
+            source,
+        })?;
         let pid = child.id();
         *guard = Some(child);
         Ok(pid)
@@ -474,6 +495,24 @@ mod tests {
         let supervisor = SystemSupervisor::new();
         supervisor.terminate(Duration::from_millis(50)).unwrap();
         assert!(!supervisor.is_running().unwrap());
+    }
+
+    #[test]
+    fn supervisor_captures_child_output_when_a_log_path_is_set() {
+        let directory = tempfile::tempdir().unwrap();
+        let log_path = directory.path().join("mirror.log");
+        let supervisor = SystemSupervisor::new();
+        let spec = CommandSpec::new("sh", vec!["-c".to_owned(), "printf hello >&2".to_owned()])
+            .with_log_path(log_path.clone());
+        supervisor.spawn(&spec).unwrap();
+        for _ in 0..50 {
+            if !supervisor.is_running().unwrap() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let contents = std::fs::read_to_string(&log_path).unwrap_or_default();
+        assert_eq!(contents, "hello");
     }
 
     #[test]

@@ -12,12 +12,16 @@
 //! `niri validate` command. No live compositor state is modified.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use niri_display_manager::domain::profile::{self, ProfileKind};
 use niri_display_manager::infrastructure::drm_sysfs::{HardwareProbe, SysfsProbe};
 use niri_display_manager::infrastructure::kdl_parser;
 use niri_display_manager::infrastructure::niri_ipc::{NiriCliClient, NiriClient};
-use niri_display_manager::infrastructure::process_runner::SystemCommandRunner;
+use niri_display_manager::infrastructure::process_runner::{
+    CommandSpec, ProcessSupervisor, SystemCommandRunner, SystemSupervisor,
+};
+use niri_display_manager::service::display_service::is_mirror_window;
 
 fn live_client() -> NiriCliClient {
     NiriCliClient::new(Arc::new(SystemCommandRunner))
@@ -49,6 +53,42 @@ fn live_sysfs_probe_reports_connectors() {
         assert!(connector.card.starts_with("card"));
         assert!(!connector.connector.is_empty());
     }
+}
+
+#[test]
+#[ignore = "requires a live niri session and wl-mirror"]
+fn live_mirror_window_is_detected() {
+    let client = live_client();
+    let outputs = client
+        .outputs()
+        .expect("niri must answer in a live session");
+    let source = outputs
+        .iter()
+        .find(|output| output.is_internal())
+        .or_else(|| outputs.first())
+        .expect("at least one output is required")
+        .name
+        .clone();
+
+    let supervisor = SystemSupervisor::new();
+    let spec = CommandSpec::new("wl-mirror", vec![source]);
+    let pid = supervisor.spawn(&spec).expect("wl-mirror must spawn");
+    let mut detected = false;
+    for _ in 0..30 {
+        std::thread::sleep(Duration::from_millis(100));
+        let windows = client.windows().expect("niri must answer");
+        if windows.iter().any(|window| is_mirror_window(window, pid)) {
+            detected = true;
+            break;
+        }
+    }
+    supervisor
+        .terminate(Duration::from_secs(2))
+        .expect("wl-mirror must terminate");
+    assert!(
+        detected,
+        "wl-mirror window must be detected by pid or app id"
+    );
 }
 
 #[test]
