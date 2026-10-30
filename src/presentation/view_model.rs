@@ -4,7 +4,10 @@
 //! be unit-tested without a running display server. All user-visible strings
 //! are ASCII technical text: no emoji, matching the project UI policy.
 
-use crate::domain::display::{ConnectorStatus, DisplayOutput, format_scale};
+use std::collections::BTreeMap;
+
+use crate::domain::display::{ConnectorStatus, DisplayMode, DisplayOutput, format_scale};
+use crate::domain::output::{ModeSpec, OutputPreferences, OutputUpdate, Transform, VrrMode};
 use crate::domain::profile::ProfileKind;
 use crate::service::backup_service::ConfigMode;
 use crate::service::display_service::{ApplyReport, SystemState};
@@ -14,6 +17,10 @@ use crate::service::display_service::{ApplyReport, SystemState};
 pub enum AppAction {
     Refresh,
     ApplyProfile(ProfileKind),
+    ApplyOutput {
+        output: String,
+        update: OutputUpdate,
+    },
     StopMirror,
     Shutdown,
 }
@@ -38,6 +45,7 @@ pub struct AppState {
     pub mirror_running: bool,
     pub config_mode: ConfigMode,
     pub display_file_registered: bool,
+    pub output_preferences: BTreeMap<String, OutputPreferences>,
     pub busy: bool,
 }
 
@@ -50,6 +58,7 @@ impl AppState {
             mirror_running: state.mirror_running,
             config_mode: state.config_mode,
             display_file_registered: state.display_file_registered,
+            output_preferences: state.output_preferences,
             busy: false,
         }
     }
@@ -164,7 +173,106 @@ fn output_subtitle(output: &DisplayOutput) -> String {
         }
         None => parts.push("disabled".to_owned()),
     }
+    if output.vrr_enabled {
+        parts.push("VRR on".to_owned());
+    }
     parts.join(" - ")
+}
+
+/// Summary shown in the collapsed output expander row.
+pub fn output_summary(output: &DisplayOutput) -> String {
+    output_subtitle(output)
+}
+
+/// Labels for the mode selector; the preferred mode is marked.
+pub fn mode_labels(output: &DisplayOutput) -> Vec<String> {
+    output
+        .modes
+        .iter()
+        .map(|mode| {
+            let label = format!("{}x{} @ {} Hz", mode.width, mode.height, mode.refresh_hz());
+            if mode.is_preferred {
+                format!("{label} (preferred)")
+            } else {
+                label
+            }
+        })
+        .collect()
+}
+
+/// Index of the mode that should be selected initially.
+pub fn selected_mode_index(output: &DisplayOutput) -> u32 {
+    if let Some(index) = output.current_mode {
+        return index as u32;
+    }
+    if let Some(index) = output.modes.iter().position(|mode| mode.is_preferred) {
+        return index as u32;
+    }
+    0
+}
+
+/// Map a combo index back to a concrete mode.
+pub fn mode_at(modes: &[DisplayMode], index: u32) -> Option<ModeSpec> {
+    modes.get(index as usize).map(ModeSpec::from_mode)
+}
+
+/// Initial scale shown in the spin control.
+pub fn initial_scale(output: &DisplayOutput) -> f64 {
+    output
+        .logical
+        .as_ref()
+        .map(|logical| logical.scale)
+        .unwrap_or(1.0)
+        .clamp(0.5, 3.0)
+}
+
+/// Initial transform combo index.
+pub fn initial_transform_index(output: &DisplayOutput) -> u32 {
+    output
+        .logical
+        .as_ref()
+        .and_then(|logical| Transform::from_niri(&logical.transform))
+        .unwrap_or_default()
+        .index()
+}
+
+/// Initial VRR combo index, preferring the stored fence preference so that
+/// `on-demand` survives a restart (JSON only exposes the enabled boolean).
+pub fn initial_vrr_index(output: &DisplayOutput, preferences: Option<&OutputPreferences>) -> u32 {
+    if !output.vrr_supported {
+        return VrrMode::Off.index();
+    }
+    if let Some(mode) = preferences.and_then(|preferences| preferences.vrr) {
+        return mode.index();
+    }
+    if output.vrr_enabled {
+        VrrMode::On.index()
+    } else {
+        VrrMode::Off.index()
+    }
+}
+
+/// Transform selector labels.
+pub fn transform_labels() -> Vec<&'static str> {
+    Transform::ALL
+        .iter()
+        .map(|transform| transform.label())
+        .collect()
+}
+
+/// VRR selector labels.
+pub fn vrr_labels() -> Vec<&'static str> {
+    VrrMode::ALL.iter().map(|mode| mode.label()).collect()
+}
+
+/// Whether an output may be disabled without leaving zero active displays.
+pub fn can_disable_output(state: &AppState, name: &str) -> bool {
+    state
+        .outputs
+        .iter()
+        .filter(|output| output.name != name && output.is_enabled())
+        .count()
+        > 0
 }
 
 #[cfg(test)]
@@ -218,6 +326,7 @@ mod tests {
             mirror_running: false,
             config_mode: ConfigMode::Modular,
             display_file_registered: true,
+            output_preferences: BTreeMap::new(),
             busy: false,
         }
     }
@@ -313,5 +422,82 @@ mod tests {
         for value in strings {
             assert!(value.is_ascii(), "non-ASCII UI string: {value}");
         }
+    }
+
+    #[test]
+    fn mode_helpers_mark_preferred_and_preselect_current() {
+        let mut current = output("eDP-1", true);
+        current.modes.push(DisplayMode {
+            width: 1280,
+            height: 720,
+            refresh_rate: 60_000,
+            is_preferred: false,
+        });
+        let labels = mode_labels(&current);
+        assert_eq!(labels.len(), 2);
+        assert!(labels[0].contains("(preferred)"));
+        assert_eq!(selected_mode_index(&current), 0);
+        assert_eq!(
+            mode_at(&current.modes, 1),
+            Some(ModeSpec {
+                width: 1280,
+                height: 720,
+                refresh_millihertz: 60_000
+            })
+        );
+
+        let mut disabled = output("HDMI-A-1", false);
+        disabled.current_mode = None;
+        assert_eq!(selected_mode_index(&disabled), 0);
+        assert_eq!(mode_at(&disabled.modes, 99), None);
+    }
+
+    #[test]
+    fn control_defaults_follow_live_and_stored_state() {
+        let mut current = output("eDP-1", true);
+        if let Some(logical) = current.logical.as_mut() {
+            logical.scale = 1.25;
+            logical.transform = "flipped-270".to_owned();
+        }
+        current.vrr_supported = true;
+        current.vrr_enabled = true;
+        assert_eq!(initial_scale(&current), 1.25);
+        assert_eq!(
+            initial_transform_index(&current),
+            Transform::Flipped270.index()
+        );
+        assert_eq!(initial_vrr_index(&current, None), VrrMode::On.index());
+
+        let stored = OutputPreferences {
+            vrr: Some(VrrMode::OnDemand),
+            ..OutputPreferences::default()
+        };
+        assert_eq!(
+            initial_vrr_index(&current, Some(&stored)),
+            VrrMode::OnDemand.index()
+        );
+
+        let unsupported = output("HDMI-A-1", true);
+        assert_eq!(initial_vrr_index(&unsupported, None), VrrMode::Off.index());
+        assert!(transform_labels().iter().all(|label| label.is_ascii()));
+        assert!(vrr_labels().iter().all(|label| label.is_ascii()));
+    }
+
+    #[test]
+    fn disabling_is_only_allowed_while_another_display_stays_enabled() {
+        let mut current = state();
+        // The external display is disabled in the fixture, so the panel must stay.
+        assert!(!can_disable_output(&current, "eDP-1"));
+
+        current.outputs[1].logical = Some(LogicalGeometry {
+            x: 1920,
+            y: 0,
+            width: 2560,
+            height: 1440,
+            scale: 1.0,
+            transform: "Normal".to_owned(),
+        });
+        assert!(can_disable_output(&current, "eDP-1"));
+        assert!(can_disable_output(&current, "HDMI-A-1"));
     }
 }

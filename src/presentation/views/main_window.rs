@@ -15,6 +15,9 @@ use gtk4 as gtk;
 
 use crate::APP_ID;
 use crate::cli::ParsedArgs;
+use crate::domain::display::{DisplayOutput, OutputId};
+use crate::domain::output::{OutputUpdate, Transform, VrrMode};
+use crate::domain::profile::ProfileKind;
 use crate::infrastructure::drm_sysfs::SysfsProbe;
 use crate::infrastructure::niri_ipc::NiriCliClient;
 use crate::infrastructure::process_runner::{MirrorPidFile, SystemCommandRunner, SystemSupervisor};
@@ -281,6 +284,18 @@ fn worker_loop(
                 send_event(&event_sender, AppEvent::Busy(false));
                 publish_state(&service, &event_sender);
             }
+            AppAction::ApplyOutput { output, update } => {
+                send_event(&event_sender, AppEvent::Busy(true));
+                match service.apply_output_config(&OutputId::new(output), &update) {
+                    Ok(report) => send_event(&event_sender, AppEvent::Applied(Box::new(report))),
+                    Err(error) => send_event(
+                        &event_sender,
+                        AppEvent::Failed(format!("Failed to apply output settings: {error}")),
+                    ),
+                }
+                send_event(&event_sender, AppEvent::Busy(false));
+                publish_state(&service, &event_sender);
+            }
         }
         if event_sender.is_closed() {
             break;
@@ -324,6 +339,9 @@ fn handle_event(ui: &Ui, event: AppEvent) {
                 let toast = adw::Toast::new(warning);
                 toast.set_timeout(8);
                 ui.toast_overlay.add_toast(toast);
+            } else if report.profile == ProfileKind::Custom {
+                ui.toast_overlay
+                    .add_toast(adw::Toast::new("Applied output settings"));
             } else {
                 ui.toast_overlay.add_toast(adw::Toast::new(&format!(
                     "Applied profile: {}",
@@ -363,8 +381,7 @@ fn rebuild(ui: &Ui) {
     }
 
     clear_group(&ui.outputs_group, &ui.output_widgets);
-    let outputs = view_model::output_rows(&state);
-    if outputs.is_empty() {
+    if state.outputs.is_empty() {
         let empty = adw::ActionRow::builder()
             .title("No outputs detected")
             .subtitle("Check that niri is running in this session")
@@ -373,8 +390,8 @@ fn rebuild(ui: &Ui) {
         ui.outputs_group.add(&empty);
         ui.output_widgets.borrow_mut().push(empty.upcast());
     } else {
-        for row in outputs {
-            let widget = build_info_row(&row);
+        for output in &state.outputs {
+            let widget = build_output_expander(&ui.actions, &state, output);
             ui.outputs_group.add(&widget);
             ui.output_widgets.borrow_mut().push(widget.upcast());
         }
@@ -421,6 +438,109 @@ fn build_profile_row(
         let _ = actions.try_send(AppAction::ApplyProfile(profile));
     });
     widget
+}
+
+fn build_output_expander(
+    actions: &async_channel::Sender<AppAction>,
+    state: &AppState,
+    output: &DisplayOutput,
+) -> adw::ExpanderRow {
+    let expander = adw::ExpanderRow::builder()
+        .title(&output.name)
+        .subtitle(view_model::output_summary(output))
+        .build();
+    expander.add_prefix(&gtk::Image::from_icon_name(if output.is_internal() {
+        "computer-symbolic"
+    } else {
+        "video-display-symbolic"
+    }));
+
+    let mode_labels = view_model::mode_labels(output);
+    let mode_refs: Vec<&str> = mode_labels.iter().map(String::as_str).collect();
+    let mode_model = gtk::StringList::new(&mode_refs);
+    let mode_row = adw::ComboRow::builder()
+        .title("Mode")
+        .model(&mode_model)
+        .build();
+    mode_row.set_selected(view_model::selected_mode_index(output));
+    mode_row.set_sensitive(!output.modes.is_empty());
+    expander.add_row(&mode_row);
+
+    let adjustment =
+        gtk::Adjustment::new(view_model::initial_scale(output), 0.5, 3.0, 0.05, 0.1, 0.0);
+    let scale_row = adw::SpinRow::builder()
+        .title("Scale")
+        .adjustment(&adjustment)
+        .climb_rate(0.05)
+        .digits(2)
+        .build();
+    expander.add_row(&scale_row);
+
+    let transform_labels = view_model::transform_labels();
+    let transform_model = gtk::StringList::new(&transform_labels);
+    let transform_row = adw::ComboRow::builder()
+        .title("Transform")
+        .model(&transform_model)
+        .build();
+    transform_row.set_selected(view_model::initial_transform_index(output));
+    expander.add_row(&transform_row);
+
+    let vrr_labels = view_model::vrr_labels();
+    let vrr_model = gtk::StringList::new(&vrr_labels);
+    let vrr_row = adw::ComboRow::builder()
+        .title("Variable refresh rate")
+        .model(&vrr_model)
+        .build();
+    let stored = state.output_preferences.get(&output.name);
+    vrr_row.set_selected(view_model::initial_vrr_index(output, stored));
+    vrr_row.set_sensitive(output.vrr_supported);
+    expander.add_row(&vrr_row);
+
+    let enabled_row = adw::SwitchRow::builder()
+        .title("Enabled")
+        .active(output.is_enabled())
+        .build();
+    if output.is_enabled() && !view_model::can_disable_output(state, &output.name) {
+        enabled_row.set_sensitive(false);
+        enabled_row.set_subtitle("At least one display must remain enabled");
+    }
+    expander.add_row(&enabled_row);
+
+    let apply_row = adw::ActionRow::builder()
+        .title("Apply output settings")
+        .build();
+    apply_row.set_activatable(false);
+    let apply_button = gtk::Button::builder().label("Apply").build();
+    apply_button.add_css_class("suggested-action");
+    apply_row.add_suffix(&apply_button);
+    expander.add_row(&apply_row);
+
+    let modes = output.modes.clone();
+    let position = output
+        .logical
+        .as_ref()
+        .map(|logical| (logical.x, logical.y));
+    let output_name = output.name.clone();
+    let actions = actions.clone();
+    apply_button.connect_clicked(move |_| {
+        let update = OutputUpdate {
+            enabled: enabled_row.is_active(),
+            mode: view_model::mode_at(&modes, mode_row.selected()),
+            scale: Some(scale_row.value()),
+            transform: Some(Transform::from_index(transform_row.selected())),
+            position,
+            vrr: Some(VrrMode::from_index(vrr_row.selected())),
+        };
+        let _ = actions.try_send(AppAction::ApplyOutput {
+            output: output_name.clone(),
+            update,
+        });
+    });
+
+    if state.busy {
+        expander.set_sensitive(false);
+    }
+    expander
 }
 
 fn build_info_row(row: &InfoRow) -> adw::ActionRow {
