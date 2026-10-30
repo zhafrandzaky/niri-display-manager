@@ -220,10 +220,10 @@ Verification record (final run):
 
 - `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, and
   `cargo test` are green.
-- Test suite: 81 unit tests, 9 integration tests, and 3 live-session tests
+- Test suite: 102 unit tests, 10 integration tests, and 4 live-session tests
   (read-only, run with `cargo test --test live_environment -- --ignored`).
 - Coverage (`cargo llvm-cov`, `main.rs` and the presentation layer excluded):
-  92.48 percent lines and 92.61 percent regions, with every measured file at or
+  93.59 percent lines and 93.13 percent regions, with every measured file at or
   above 80 percent lines.
 - Live checks: real `niri msg --json` outputs and windows parsed, real DRM sysfs
   probed, generated configurations accepted by the real `niri validate`, and
@@ -255,3 +255,24 @@ Dual-mode configuration management landed on top of the original design:
 - P5: unit and integration tests cover vanilla and modular apply/rollback and
   path resolution; `docs/PORTABILITY.md` records the architecture and the
   compatibility matrix.
+
+## 11. Per-monitor display configuration (implemented)
+
+Every output row is now an expander with mode, scale, transform, VRR, and
+enabled controls plus an Apply action.
+
+- Domain: `ModeSpec` (exact refresh rate in millihertz), `Transform`, `VrrMode`,
+  `OutputPreferences`, and `OutputUpdate`; `OutputPlan` carries mode, transform,
+  and VRR so the managed fence can persist them.
+- Planning: `plan_output_configuration` builds a `Custom` plan for every known
+  output, applies the requested settings to one output, preserves the others,
+  validates the mode against the output's advertised list, constrains scale to
+  0.5-3.0, refuses unsupported VRR, and rejects disabling the last enabled
+  display before any write.
+- Preference preservation: quick profiles merge live state and stored fence
+  preferences (`apply_preferences`), including `on-demand` VRR, while profile
+  position math still wins.
+- Verification: exact mode, scale (0.001 tolerance), transform, position,
+  enabled state, and VRR on/off; `on-demand` is accepted without a live flag.
+- Tests: domain planning/guards/verification, KDL render/parse round-trip,
+  service apply and rollback, inline-mode integration, and UI helper tests.

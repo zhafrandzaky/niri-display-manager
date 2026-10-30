@@ -16,6 +16,7 @@ HDMI ports are split across `card0` and `card1`.
 | Five display profiles | Internal only, Extend right, Extend left, Mirror / Presentation, External only |
 | Persisted layouts | Profiles are written to the niri configuration and survive restarts |
 | Portable dual-mode | Uses a modular `cfg/display.kdl` when it is included, otherwise manages a fenced section in the main `config.kdl` |
+| Per-monitor settings | Expand any output to change mode, scale, transform, VRR, and enabled state through the same verified apply pipeline |
 | Instant application | Each apply reloads niri through `niri msg action load-config-file` |
 | Verified apply | Output state is polled after reload; failures trigger an automatic rollback |
 | Pristine backup | A `.bak` of the managed file is created once before the first change and restores idempotently |
@@ -89,13 +90,17 @@ output "eDP-1" {
     position x=0 y=0
 }
 output "HDMI-A-1" {
+    mode "1920x1080@144.001"
     position x=1920 y=0
     scale 1
+    variable-refresh-rate on-demand=true
 }
 // <<< niri-display-manager: end of managed section
 ```
 
-Everything outside the fence is preserved byte for byte.
+Everything outside the fence is preserved byte for byte. The fence also carries
+per-output `mode`, `scale`, `transform`, and `variable-refresh-rate` settings
+written from the Outputs section.
 
 ## Configuration discovery
 

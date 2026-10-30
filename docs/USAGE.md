@@ -16,7 +16,7 @@ window.
 |---|---|
 | Status | Current managed profile, mirror state, and the active configuration mode (modular or portable inline) |
 | Display Profiles | The five profiles; the active one carries a check mark |
-| Outputs | Every output niri reports, with mode, position, and scale |
+| Outputs | Expandable rows per output: mode, scale, transform, VRR, enabled state, and an Apply button |
 | Hardware Ports | Every DRM connector from `/sys/class/drm` with `card` and cable state |
 | Mirroring | Visible while mirroring: shows the state and a Stop Mirroring button |
 | Header | Refresh button and a busy spinner while an apply is in progress |
@@ -44,6 +44,32 @@ Conditions:
   already adopted. This prevents black-screen states.
 - Applying any profile stops a running mirror first, so mirror windows never
   outlive their profile.
+
+## Per-monitor configuration
+
+Every row under Outputs is an expander. Its subtitle shows the current summary
+and the controls write per-output settings:
+
+| Control | Behavior |
+|---|---|
+| Mode | Lists every mode niri reports; the preferred mode is marked and the current mode is preselected |
+| Scale | Fractional scaling from 0.5 to 3.0 in 0.05 steps |
+| Transform | Normal, 90, 180, 270, and the four flipped variants |
+| Variable refresh rate | Off, On, or On demand; disabled when the output reports no VRR support |
+| Enabled | Guarded while it is the only active display; at least one display must stay enabled |
+| Apply | Writes the settings through the backup, validate, reload, verify, rollback pipeline |
+
+Notes:
+
+- Applying per-monitor settings produces the "Custom Configuration" profile and
+  stops any active mirror first.
+- Quick profiles preserve per-output mode, scale, transform, and VRR: live
+  state is reused, stored fence preferences fill disabled outputs, and
+  `on-demand` VRR is preserved from the fence.
+- Positions remain profile-driven for quick profiles; per-monitor Apply keeps
+  the output's current position.
+- On-demand VRR cannot be observed while the output is idle, so verification
+  checks only that the mode was accepted rather than the live VRR flag.
 
 ## Presentation workflow (HDMI projector)
 
@@ -148,5 +174,8 @@ cable-less paths):
 | "wl-mirror exited immediately" | Read the same log file; the failure message includes its path |
 | Mirror window is on the panel instead of the projector | The manager moves it to the target and re-verifies; if it persists, check that the external output is enabled and not fullscreen on another workspace |
 | "setup required" message | The file passed with `--display-config` is not included by `config.kdl`; add the include or run without `--display-config` to use portable inline mode |
+| Mode or scale is rejected | The manager rolls back automatically; pick a mode listed for that output and keep scale between 0.5 and 3.0 |
+| The Enabled switch is insensitive | At least one display must remain enabled; enable another output first |
+| VRR options are insensitive | The output does not report variable refresh rate support |
 | Profile applies but nothing changes | Run `niri-display-manager --print-paths` and confirm the reported mode and files |
 | Active profile shows as "No managed profile applied" after edits | The `// profile:` comment in the managed section was removed; apply a profile again |

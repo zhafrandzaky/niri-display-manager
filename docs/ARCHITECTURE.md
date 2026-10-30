@@ -48,7 +48,8 @@ no knowledge of niri, GTK, sysfs, or the filesystem.
 | Module | Responsibility |
 |---|---|
 | `domain::display` | `DisplayOutput`, `DisplayMode`, `LogicalGeometry`, `ConnectorStatus`, connector classification (`eDP`/`LVDS`/`DSI` are internal) |
-| `domain::profile` | `ProfileKind`, `LayoutPlan`, `MirrorPlan`, pure position math, plan verification, planning errors |
+| `domain::output` | `ModeSpec`, `Transform`, `VrrMode`, `OutputPreferences`, `OutputUpdate`; parsing/formatting and live-state derivation |
+| `domain::profile` | `ProfileKind` (quick profiles plus `Custom`), `LayoutPlan`, `MirrorPlan`, pure position math, per-output planning, preference merging, plan verification, planning errors |
 | `service::display_service` | Apply pipeline, verification polling, rollback, mirror start/stop, orphan cleanup, `SystemState` for the UI |
 | `service::backup_service` | `ConfigStore` trait and `FileConfigStore`: snapshot-once, atomic writes, restore, include detection |
 | `infrastructure::niri_ipc` | `NiriClient` trait and `NiriCliClient` over `niri msg --json` / `niri msg action` |
@@ -97,6 +98,30 @@ no knowledge of niri, GTK, sysfs, or the filesystem.
 Any failure in steps 6-9 triggers `rollback()`: restore the snapshot, reload,
 and log secondary failures without masking the original error.
 
+Per-monitor changes from the Outputs section reuse the same pipeline through
+`plan_output_configuration`: a `Custom` plan contains every currently known
+output, applies the requested mode/scale/transform/VRR/enabled change to the
+selected output, preserves the other outputs from live state, and rejects
+disabling the last enabled display before any snapshot or write. Quick profiles
+merge per-output preferences via `apply_preferences`: live state is authoritative
+for enabled outputs, stored fence preferences fill disabled outputs, and
+`on-demand` VRR is recovered from the fence because the JSON output only exposes
+an enabled boolean.
+
+## Verification checks
+
+`verify_plan` checks, for every planned output:
+
+- enabled/disabled state (disabled outputs must have no logical geometry),
+- logical position when one is planned,
+- exact mode (width, height, and refresh rate in millihertz),
+- scale with a 0.001 tolerance,
+- transform string (`normal`, `90`... `flipped-270`),
+- VRR on/off; `on-demand` cannot be observed while the output is idle and is
+  accepted without a live-flag check.
+
+Any mismatch restores the snapshot and reloads the previous configuration.
+
 ## Mirror lifecycle
 
 ```text
@@ -139,15 +164,20 @@ output "eDP-1" {
     position x=0 y=0
 }
 output "HDMI-A-1" {
-    position x=1920 y=0
+    mode "1920x1080@144.001"
     scale 1
+    transform "90"
+    position x=1920 y=0
+    variable-refresh-rate on-demand=true
 }
 // <<< niri-display-manager: end of managed section
 ```
 
-Properties used: `off`, `position x= y=`, `scale`. Modes are intentionally left
-unset so niri keeps the user's preferred mode; external outputs receive an
-explicit `scale 1` so left-position math is deterministic.
+Properties used: `off`, `mode "WxH@Hz.mmm"`, `scale`, `transform`, `position`,
+and `variable-refresh-rate` (with `on-demand=true`). Modes are emitted from live
+or stored preferences so quick profile switches preserve them; external outputs
+without live geometry receive an explicit `scale 1` so left-position math stays
+deterministic.
 
 ## Fail-safe table
 
@@ -225,10 +255,10 @@ Lint policy (`lib.rs`): `#![forbid(unsafe_code)]` plus denied
 
 | Level | What is covered |
 |---|---|
-| Domain unit tests | Connector classification, external selection, scale-aware position math, all five plans, mirror argv, verification mismatches |
-| Infrastructure unit tests | Real captured niri JSON fixtures, sysfs fixture trees, KDL splice/remove idempotency, command timeouts, real SIGTERM supervision, pid file lifecycle |
-| Service unit tests | Full pipeline with fakes: happy path, validation rollback, verification rollback, reset idempotency, mirror start/stop, orphan cleanup |
-| Integration tests | Real `FileConfigStore` on temporary directories: managed section on disk, pristine backup bytes, persist-without-cable, refusals |
+| Domain unit tests | Connector classification, external selection, scale-aware position math, all five plans, mirror argv, verification mismatches, per-output planning and guards, preference merging |
+| Infrastructure unit tests | Real captured niri JSON fixtures, sysfs fixture trees, KDL splice/remove idempotency and per-output settings round-trip, command timeouts, real SIGTERM supervision, pid file lifecycle |
+| Service unit tests | Full pipeline with fakes: happy path, validation rollback, verification rollback, reset idempotency, mirror start/stop, orphan cleanup, per-output apply, last-display guard |
+| Integration tests | Real `FileConfigStore` on temporary directories: managed section on disk, pristine backup bytes, persist-without-cable, refusals, per-monitor settings in inline mode |
 | Live tests (`--ignored`) | Real niri outputs, real sysfs, real `niri validate` on generated configurations in a temporary directory |
 | Manual | GUI launch and HDMI-dependent flows with a physical monitor |
 
