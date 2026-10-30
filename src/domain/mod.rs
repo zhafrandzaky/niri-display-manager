@@ -4,4 +4,5 @@
 //! filesystem. Layout planning and verification live in [`profile`].
 
 pub mod display;
+pub mod output;
 pub mod profile;

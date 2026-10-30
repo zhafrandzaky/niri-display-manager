@@ -9,8 +9,10 @@
 //! tell whether a dedicated display file is wired into the main configuration
 //! or whether the portable inline mode must be used.
 
+use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
 
+use crate::domain::output::{ModeSpec, OutputPreferences, Transform, VrrMode};
 use crate::domain::profile::{LayoutPlan, ProfileKind};
 
 /// First line of the managed section.
@@ -33,13 +35,28 @@ pub fn render_section(plan: &LayoutPlan) -> String {
         if !output.enabled {
             section.push_str("    off\n");
         }
-        if let Some((x, y)) = output.position {
-            section.push_str(&format!("    position x={x} y={y}\n"));
+        if let Some(mode) = &output.mode {
+            section.push_str(&format!("    mode \"{}\"\n", mode.kdl_value()));
         }
         if let Some(scale) = output.scale {
             section.push_str("    scale ");
             section.push_str(&crate::domain::display::format_scale(scale));
             section.push('\n');
+        }
+        if let Some(transform) = output.transform
+            && transform != Transform::Normal
+        {
+            section.push_str(&format!("    transform \"{}\"\n", transform.niri_value()));
+        }
+        if let Some((x, y)) = output.position {
+            section.push_str(&format!("    position x={x} y={y}\n"));
+        }
+        match output.vrr {
+            Some(VrrMode::On) => section.push_str("    variable-refresh-rate\n"),
+            Some(VrrMode::OnDemand) => {
+                section.push_str("    variable-refresh-rate on-demand=true\n");
+            }
+            Some(VrrMode::Off) | None => {}
         }
         section.push_str("}\n");
     }
@@ -99,6 +116,63 @@ pub fn section_profile(contents: &str) -> Option<ProfileKind> {
         .lines()
         .find_map(|line| line.strip_prefix("// profile: "))
         .and_then(|id| ProfileKind::from_id(id.trim()))
+}
+
+/// Parse per-output preferences from the managed section.
+///
+/// This reads only the machine-generated fence. The format is intentionally
+/// simple and line-based; unknown lines are ignored. Preferences are used to
+/// preserve settings across quick profile switches and to recover `on-demand`
+/// VRR, which is not exposed in `niri msg --json outputs`.
+pub fn parse_section_preferences(contents: &str) -> BTreeMap<String, OutputPreferences> {
+    let mut preferences = BTreeMap::new();
+    let Some((start, end)) = find_section_range(contents) else {
+        return preferences;
+    };
+    let mut current: Option<(String, OutputPreferences)> = None;
+
+    for raw_line in contents[start..end].lines() {
+        let line = raw_line.trim();
+        if let Some(rest) = line.strip_prefix("output \"") {
+            if let Some(name) = rest.split('"').next()
+                && !name.is_empty()
+            {
+                if let Some((previous_name, previous)) = current.take() {
+                    preferences.insert(previous_name, previous);
+                }
+                current = Some((name.to_owned(), OutputPreferences::default()));
+            }
+            continue;
+        }
+        if line == "}" {
+            if let Some((name, parsed)) = current.take() {
+                preferences.insert(name, parsed);
+            }
+            continue;
+        }
+        let Some((_, parsed)) = current.as_mut() else {
+            continue;
+        };
+        if let Some(value) = line.strip_prefix("mode \"") {
+            if let Some(value) = value.strip_suffix('"') {
+                parsed.mode = ModeSpec::from_kdl(value);
+            }
+        } else if let Some(value) = line.strip_prefix("scale ") {
+            parsed.scale = value.trim().parse::<f64>().ok();
+        } else if let Some(value) = line.strip_prefix("transform \"") {
+            if let Some(value) = value.strip_suffix('"') {
+                parsed.transform = Transform::from_niri(value);
+            }
+        } else if line == "variable-refresh-rate on-demand=true" {
+            parsed.vrr = Some(VrrMode::OnDemand);
+        } else if line == "variable-refresh-rate" {
+            parsed.vrr = Some(VrrMode::On);
+        }
+    }
+    if let Some((name, parsed)) = current.take() {
+        preferences.insert(name, parsed);
+    }
+    preferences
 }
 
 /// Extract file paths referenced by top-level `include` directives.
@@ -217,6 +291,9 @@ mod tests {
                     enabled: true,
                     position: Some((0, 0)),
                     scale: None,
+                    mode: None,
+                    transform: None,
+                    vrr: None,
                     expect_present: true,
                 },
                 OutputPlan {
@@ -224,6 +301,9 @@ mod tests {
                     enabled: true,
                     position: Some((1920, 0)),
                     scale: Some(1.0),
+                    mode: None,
+                    transform: None,
+                    vrr: None,
                     expect_present: true,
                 },
             ],
@@ -354,5 +434,52 @@ mod tests {
 
         let unrelated = "include \"./cfg/input.kdl\"\n";
         assert!(!includes_target(unrelated, base, &target, None));
+    }
+
+    #[test]
+    fn renders_and_parses_per_output_settings() {
+        let plan = LayoutPlan {
+            profile: ProfileKind::Custom,
+            outputs: vec![OutputPlan {
+                output: OutputId::new("HDMI-A-1"),
+                enabled: true,
+                position: Some((1920, 0)),
+                scale: Some(1.25),
+                mode: Some(ModeSpec {
+                    width: 2560,
+                    height: 1440,
+                    refresh_millihertz: 59_951,
+                }),
+                transform: Some(Transform::Rotate90),
+                vrr: Some(VrrMode::OnDemand),
+                expect_present: true,
+            }],
+            focus_output: None,
+        };
+        let section = render_section(&plan);
+        assert!(section.contains("    mode \"2560x1440@59.951\"\n"));
+        assert!(section.contains("    scale 1.25\n"));
+        assert!(section.contains("    transform \"90\"\n"));
+        assert!(section.contains("    variable-refresh-rate on-demand=true\n"));
+
+        let parsed = parse_section_preferences(&splice("// user\n", &section));
+        let preferences = parsed.get("HDMI-A-1").expect("output preferences");
+        assert_eq!(preferences.mode, plan.outputs[0].mode);
+        assert_eq!(preferences.scale, Some(1.25));
+        assert_eq!(preferences.transform, Some(Transform::Rotate90));
+        assert_eq!(preferences.vrr, Some(VrrMode::OnDemand));
+    }
+
+    #[test]
+    fn renders_vrr_on_and_off_without_extra_lines() {
+        let mut plan = sample_plan();
+        plan.outputs[1].vrr = Some(VrrMode::On);
+        let section = render_section(&plan);
+        assert!(section.contains("    variable-refresh-rate\n"));
+        assert!(!section.contains("on-demand"));
+
+        plan.outputs[1].vrr = Some(VrrMode::Off);
+        let section = render_section(&plan);
+        assert!(!section.contains("variable-refresh-rate"));
     }
 }

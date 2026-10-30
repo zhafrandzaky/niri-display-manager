@@ -8,9 +8,14 @@
 use super::display::{
     ConnectorKind, ConnectorStatus, DEFAULT_LOGICAL_WIDTH, DisplayOutput, OutputId,
 };
+use super::output::{ModeSpec, OutputPreferences, OutputUpdate, Transform, VrrMode};
+use std::collections::BTreeMap;
 use std::fmt;
 
-/// The five supported display profiles.
+/// The supported display profiles.
+///
+/// [`ProfileKind::Custom`] is produced by the per-monitor Outputs section and
+/// is not part of the five quick profiles presented as rows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ProfileKind {
     InternalOnly,
@@ -18,6 +23,7 @@ pub enum ProfileKind {
     ExtendLeft,
     Mirror,
     ExternalOnly,
+    Custom,
 }
 
 impl ProfileKind {
@@ -38,11 +44,15 @@ impl ProfileKind {
             ProfileKind::ExtendLeft => "extend-left",
             ProfileKind::Mirror => "mirror",
             ProfileKind::ExternalOnly => "external-only",
+            ProfileKind::Custom => "custom",
         }
     }
 
     pub fn from_id(id: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|profile| profile.id() == id)
+        Self::ALL
+            .into_iter()
+            .find(|profile| profile.id() == id)
+            .or_else(|| (id == "custom").then_some(ProfileKind::Custom))
     }
 
     pub fn label(self) -> &'static str {
@@ -52,6 +62,7 @@ impl ProfileKind {
             ProfileKind::ExtendLeft => "Extend Left",
             ProfileKind::Mirror => "Mirror / Presentation",
             ProfileKind::ExternalOnly => "External Only",
+            ProfileKind::Custom => "Custom Configuration",
         }
     }
 
@@ -66,6 +77,7 @@ impl ProfileKind {
             ProfileKind::ExternalOnly => {
                 "Turn off the laptop panel and use the external display only"
             }
+            ProfileKind::Custom => "Per-monitor settings applied from the Outputs section",
         }
     }
 
@@ -75,6 +87,7 @@ impl ProfileKind {
             ProfileKind::ExtendRight | ProfileKind::ExtendLeft => "video-joined-displays-symbolic",
             ProfileKind::Mirror => "display-projector-symbolic",
             ProfileKind::ExternalOnly => "video-display-symbolic",
+            ProfileKind::Custom => "preferences-desktop-display-symbolic",
         }
     }
 }
@@ -94,6 +107,12 @@ pub struct OutputPlan {
     pub position: Option<(i32, i32)>,
     /// Explicit scale when the profile needs deterministic geometry.
     pub scale: Option<f64>,
+    /// Exact display mode to apply.
+    pub mode: Option<ModeSpec>,
+    /// Rotation/flip to apply.
+    pub transform: Option<Transform>,
+    /// Variable refresh rate mode to apply.
+    pub vrr: Option<VrrMode>,
     /// Whether verification requires the output to be visible in niri.
     ///
     /// Extend profiles persist a plan for a not-yet-connected display, so that
@@ -136,7 +155,7 @@ impl MirrorPlan {
 }
 
 /// Errors raised while planning a profile.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum PlanError {
     #[error("no internal display (eDP/LVDS/DSI) is available")]
     NoInternalDisplay,
@@ -148,6 +167,18 @@ pub enum PlanError {
     ExternalNotReady,
     #[error("mirroring requires both an internal panel and an available external display")]
     MirrorRequiresTwoDisplays,
+    #[error("output {output} was not found in niri; refresh and retry")]
+    OutputNotFound { output: String },
+    #[error("output {output} does not support mode {mode}")]
+    UnknownMode { output: String, mode: String },
+    #[error("scale {0} is outside the supported range 0.5 to 3.0")]
+    InvalidScale(f64),
+    #[error("output {output} does not support variable refresh rate")]
+    VrrUnsupported { output: String },
+    #[error("at least one display must remain enabled")]
+    LastDisplayDisabled,
+    #[error("the custom profile is built from the Outputs section, not planned directly")]
+    CustomProfileNotPlannable,
 }
 
 /// Extend direction for position calculation.
@@ -175,6 +206,7 @@ pub fn plan_profile(
         ProfileKind::ExtendLeft => plan_extend(profile, outputs, connectors, ExtendDirection::Left),
         ProfileKind::Mirror => plan_mirror_layout(outputs),
         ProfileKind::ExternalOnly => plan_external_only(outputs, connectors),
+        ProfileKind::Custom => Err(PlanError::CustomProfileNotPlannable),
     }
 }
 
@@ -214,6 +246,62 @@ pub fn verify_plan(plan: &LayoutPlan, outputs: &[DisplayOutput]) -> Result<(), S
             let Some(logical) = &actual.logical else {
                 return Err(format!("output {} is still disabled", expected.output));
             };
+            if let Some(scale) = expected.scale
+                && (logical.scale - scale).abs() > 0.001
+            {
+                return Err(format!(
+                    "output {} has scale {}, expected {}",
+                    expected.output, logical.scale, scale
+                ));
+            }
+            if let Some(transform) = expected.transform {
+                match Transform::from_niri(&logical.transform) {
+                    Some(actual_transform) if actual_transform == transform => {}
+                    _ => {
+                        return Err(format!(
+                            "output {} has transform \"{}\", expected \"{}\"",
+                            expected.output,
+                            logical.transform,
+                            transform.niri_value()
+                        ));
+                    }
+                }
+            }
+            if let Some(mode) = &expected.mode {
+                match actual.current_mode() {
+                    Some(current) if mode.matches(current) => {}
+                    Some(current) => {
+                        return Err(format!(
+                            "output {} uses {}x{}@{} Hz, expected {}",
+                            expected.output,
+                            current.width,
+                            current.height,
+                            crate::domain::output::refresh_to_hz(current.refresh_rate),
+                            mode.kdl_value()
+                        ));
+                    }
+                    None => {
+                        return Err(format!("output {} has no active mode", expected.output));
+                    }
+                }
+            }
+            if let Some(vrr) = expected.vrr {
+                match vrr {
+                    VrrMode::Off if actual.vrr_enabled => {
+                        return Err(format!(
+                            "output {} has VRR enabled, expected off",
+                            expected.output
+                        ));
+                    }
+                    VrrMode::On if !actual.vrr_enabled => {
+                        return Err(format!(
+                            "output {} has VRR disabled, expected on",
+                            expected.output
+                        ));
+                    }
+                    _ => {}
+                }
+            }
             if let Some((x, y)) = expected.position
                 && (logical.x != x || logical.y != y)
             {
@@ -227,6 +315,167 @@ pub fn verify_plan(plan: &LayoutPlan, outputs: &[DisplayOutput]) -> Result<(), S
         }
     }
     Ok(())
+}
+
+/// Merge persisted/live per-output preferences into a profile plan.
+///
+/// Live state wins for enabled outputs because it is what niri actually
+/// applies; stored fence preferences fill in disabled outputs and preserve
+/// `on-demand` VRR, which the JSON output cannot express.
+pub fn apply_preferences(
+    layout: &mut LayoutPlan,
+    stored: &BTreeMap<String, OutputPreferences>,
+    outputs: &[DisplayOutput],
+) {
+    for planned in &mut layout.outputs {
+        let live = outputs
+            .iter()
+            .find(|output| output.name == planned.output.as_str());
+        let stored_preferences = stored.get(planned.output.as_str());
+        let base = match live {
+            Some(output) if output.is_enabled() => {
+                let mut preferences = OutputPreferences::from_output(output);
+                if stored_preferences.is_some_and(|prefs| prefs.vrr == Some(VrrMode::OnDemand)) {
+                    preferences.vrr = Some(VrrMode::OnDemand);
+                }
+                preferences
+            }
+            _ => stored_preferences.cloned().unwrap_or_default(),
+        };
+        planned.mode = base.mode;
+        planned.transform = base.transform;
+        planned.vrr = base.vrr;
+        if planned.scale.is_none() {
+            planned.scale = base.scale;
+        }
+    }
+}
+
+/// Plan a custom per-output configuration.
+///
+/// Every currently known output is included so its settings are preserved in
+/// the managed fence. Disabling the last enabled display is rejected.
+pub fn plan_output_configuration(
+    outputs: &[DisplayOutput],
+    stored: &BTreeMap<String, OutputPreferences>,
+    target: &OutputId,
+    update: &OutputUpdate,
+) -> Result<LayoutPlan, PlanError> {
+    let target_output = outputs
+        .iter()
+        .find(|output| output.name == target.as_str())
+        .ok_or_else(|| PlanError::OutputNotFound {
+            output: target.to_string(),
+        })?;
+
+    let stored_preferences = stored.get(target.as_str());
+    let current = match target_output.logical.as_ref() {
+        Some(_) => OutputPreferences::from_output(target_output),
+        None => stored_preferences.cloned().unwrap_or_default(),
+    };
+    let target_preferences = OutputPreferences {
+        mode: update.mode.clone().or(current.mode),
+        scale: update.scale.or(current.scale),
+        transform: update.transform.or(current.transform),
+        vrr: update.vrr.or(current.vrr),
+    };
+
+    if let Some(mode) = &target_preferences.mode
+        && !target_output
+            .modes
+            .iter()
+            .any(|candidate| mode.matches(candidate))
+    {
+        return Err(PlanError::UnknownMode {
+            output: target.to_string(),
+            mode: mode.kdl_value(),
+        });
+    }
+    if let Some(scale) = target_preferences.scale
+        && !(0.5..=3.0).contains(&scale)
+    {
+        return Err(PlanError::InvalidScale(scale));
+    }
+    if let Some(vrr) = target_preferences.vrr
+        && vrr.is_enabled()
+        && !target_output.vrr_supported
+    {
+        return Err(PlanError::VrrUnsupported {
+            output: target.to_string(),
+        });
+    }
+    if !update.enabled {
+        let other_enabled = outputs
+            .iter()
+            .filter(|output| output.name != target.as_str() && output.is_enabled())
+            .count();
+        if other_enabled == 0 {
+            return Err(PlanError::LastDisplayDisabled);
+        }
+    }
+
+    let target_position = if update.enabled {
+        update.position.or_else(|| {
+            target_output
+                .logical
+                .as_ref()
+                .map(|logical| (logical.x, logical.y))
+        })
+    } else {
+        None
+    };
+
+    let mut planned = Vec::with_capacity(outputs.len());
+    for output in outputs {
+        if output.name == target.as_str() {
+            planned.push(OutputPlan {
+                output: output.id(),
+                enabled: update.enabled,
+                position: target_position,
+                scale: target_preferences.scale,
+                mode: target_preferences.mode.clone(),
+                transform: target_preferences.transform,
+                vrr: target_preferences.vrr,
+                expect_present: true,
+            });
+            continue;
+        }
+
+        let preferences = if output.is_enabled() {
+            let mut live = OutputPreferences::from_output(output);
+            if stored
+                .get(output.name.as_str())
+                .is_some_and(|stored| stored.vrr == Some(VrrMode::OnDemand))
+            {
+                live.vrr = Some(VrrMode::OnDemand);
+            }
+            live
+        } else {
+            stored
+                .get(output.name.as_str())
+                .cloned()
+                .unwrap_or_default()
+        };
+        planned.push(OutputPlan {
+            output: output.id(),
+            enabled: output.is_enabled(),
+            position: output
+                .logical
+                .as_ref()
+                .map(|logical| (logical.x, logical.y)),
+            scale: preferences.scale,
+            mode: preferences.mode,
+            transform: preferences.transform,
+            vrr: preferences.vrr,
+            expect_present: true,
+        });
+    }
+
+    Ok(LayoutPlan {
+        profile: ProfileKind::Custom,
+        outputs: planned,
+        focus_output: None,
+    })
 }
 
 fn internal_output(outputs: &[DisplayOutput]) -> Option<&DisplayOutput> {
@@ -303,13 +552,19 @@ fn plan_extend(
                 enabled: true,
                 position: Some((0, 0)),
                 scale: None,
+                mode: None,
+                transform: None,
+                vrr: None,
                 expect_present: true,
             },
             OutputPlan {
                 output: external_id,
                 enabled: true,
                 position: Some((external_x, 0)),
-                scale: Some(1.0),
+                scale: if external_present { None } else { Some(1.0) },
+                mode: None,
+                transform: None,
+                vrr: None,
                 expect_present: external_present,
             },
         ],
@@ -352,13 +607,19 @@ fn plan_external_only(
                 enabled: false,
                 position: None,
                 scale: None,
+                mode: None,
+                transform: None,
+                vrr: None,
                 expect_present: true,
             },
             OutputPlan {
                 output: external.id(),
                 enabled: true,
                 position: Some((0, 0)),
-                scale: Some(1.0),
+                scale: None,
+                mode: None,
+                transform: None,
+                vrr: None,
                 expect_present: true,
             },
         ],
@@ -384,13 +645,19 @@ fn plan_mirror_layout(outputs: &[DisplayOutput]) -> Result<LayoutPlan, PlanError
                 enabled: true,
                 position: Some((0, 0)),
                 scale: None,
+                mode: None,
+                transform: None,
+                vrr: None,
                 expect_present: true,
             },
             OutputPlan {
                 output: external.id(),
                 enabled: true,
                 position: Some((internal_width, 0)),
-                scale: Some(1.0),
+                scale: None,
+                mode: None,
+                transform: None,
+                vrr: None,
                 expect_present: true,
             },
         ],
@@ -459,7 +726,8 @@ mod tests {
         assert_eq!(plan.outputs[0].position, Some((0, 0)));
         assert_eq!(plan.outputs[1].output.as_str(), "HDMI-A-1");
         assert_eq!(plan.outputs[1].position, Some((1920, 0)));
-        assert_eq!(plan.outputs[1].scale, Some(1.0));
+        // Scale/mode are filled from live or stored preferences later.
+        assert_eq!(plan.outputs[1].scale, None);
         assert!(plan.outputs[1].expect_present);
     }
 
@@ -574,6 +842,226 @@ mod tests {
             assert!(profile.label().is_ascii());
             assert!(profile.description().is_ascii());
         }
+        assert_eq!(ProfileKind::from_id("custom"), Some(ProfileKind::Custom));
         assert_eq!(ProfileKind::from_id("nope"), None);
+    }
+
+    #[test]
+    fn preferences_are_preserved_and_emitted_for_quick_profiles() {
+        let mut base = dual_outputs();
+        if let Some(logical) = base[1].logical.as_mut() {
+            logical.scale = 1.25;
+            logical.transform = "90".to_owned();
+        }
+        base[1].vrr_supported = true;
+        base[1].vrr_enabled = true;
+
+        let mut stored = BTreeMap::new();
+        stored.insert(
+            "HDMI-A-1".to_owned(),
+            OutputPreferences {
+                mode: None,
+                scale: None,
+                transform: None,
+                vrr: Some(VrrMode::OnDemand),
+            },
+        );
+
+        let mut layout = plan_profile(ProfileKind::ExtendRight, &base, &[]).unwrap();
+        apply_preferences(&mut layout, &stored, &base);
+
+        let external = &layout.outputs[1];
+        assert_eq!(external.position, Some((1920, 0)));
+        assert_eq!(
+            external.mode,
+            Some(ModeSpec {
+                width: 2560,
+                height: 1080,
+                refresh_millihertz: 60_001
+            })
+        );
+        assert_eq!(external.scale, Some(1.25));
+        assert_eq!(external.transform, Some(Transform::Rotate90));
+        // The stored fence preference wins for on-demand VRR.
+        assert_eq!(external.vrr, Some(VrrMode::OnDemand));
+
+        let internal = &layout.outputs[0];
+        assert_eq!(internal.scale, Some(1.0));
+        assert_eq!(
+            internal.mode,
+            Some(ModeSpec {
+                width: 1920,
+                height: 1080,
+                refresh_millihertz: 60_001
+            })
+        );
+    }
+
+    #[test]
+    fn per_output_plan_applies_settings_and_preserves_others() {
+        let outputs = dual_outputs();
+        let update = OutputUpdate {
+            enabled: true,
+            mode: Some(ModeSpec {
+                width: 1920,
+                height: 1080,
+                refresh_millihertz: 60_001,
+            }),
+            scale: Some(1.5),
+            transform: Some(Transform::Rotate180),
+            position: Some((0, 0)),
+            vrr: Some(VrrMode::Off),
+        };
+
+        let plan =
+            plan_output_configuration(&outputs, &BTreeMap::new(), &OutputId::new("eDP-1"), &update)
+                .unwrap();
+        assert_eq!(plan.profile, ProfileKind::Custom);
+        assert_eq!(plan.outputs.len(), 2);
+
+        let internal = &plan.outputs[0];
+        assert_eq!(internal.scale, Some(1.5));
+        assert_eq!(internal.transform, Some(Transform::Rotate180));
+        assert_eq!(internal.mode, update.mode);
+
+        let external = &plan.outputs[1];
+        assert!(external.enabled);
+        assert_eq!(external.position, Some((0, 0)));
+        assert_eq!(
+            external.mode,
+            Some(ModeSpec {
+                width: 2560,
+                height: 1080,
+                refresh_millihertz: 60_001
+            })
+        );
+    }
+
+    #[test]
+    fn per_output_plan_guards_last_display_and_invalid_values() {
+        let outputs = vec![enabled_output("eDP-1", 1920)];
+        let target = OutputId::new("eDP-1");
+        let stored = BTreeMap::new();
+
+        let disable = OutputUpdate {
+            enabled: false,
+            mode: None,
+            scale: None,
+            transform: None,
+            position: None,
+            vrr: None,
+        };
+        assert_eq!(
+            plan_output_configuration(&outputs, &stored, &target, &disable).unwrap_err(),
+            PlanError::LastDisplayDisabled
+        );
+
+        let unknown_mode = OutputUpdate {
+            enabled: true,
+            mode: Some(ModeSpec {
+                width: 3840,
+                height: 2160,
+                refresh_millihertz: 60_000,
+            }),
+            scale: None,
+            transform: None,
+            position: None,
+            vrr: None,
+        };
+        assert!(matches!(
+            plan_output_configuration(&outputs, &stored, &target, &unknown_mode),
+            Err(PlanError::UnknownMode { .. })
+        ));
+
+        let invalid_scale = OutputUpdate {
+            enabled: true,
+            mode: None,
+            scale: Some(3.5),
+            transform: None,
+            position: None,
+            vrr: None,
+        };
+        assert_eq!(
+            plan_output_configuration(&outputs, &stored, &target, &invalid_scale).unwrap_err(),
+            PlanError::InvalidScale(3.5)
+        );
+
+        let unsupported_vrr = OutputUpdate {
+            enabled: true,
+            mode: None,
+            scale: None,
+            transform: None,
+            position: None,
+            vrr: Some(VrrMode::On),
+        };
+        assert!(matches!(
+            plan_output_configuration(&outputs, &stored, &target, &unsupported_vrr),
+            Err(PlanError::VrrUnsupported { .. })
+        ));
+
+        assert!(matches!(
+            plan_output_configuration(&outputs, &stored, &OutputId::new("DP-9"), &disable),
+            Err(PlanError::OutputNotFound { .. })
+        ));
+    }
+
+    #[test]
+    fn verification_checks_mode_scale_transform_and_vrr() {
+        let outputs = dual_outputs();
+        let update = OutputUpdate {
+            enabled: true,
+            mode: Some(ModeSpec {
+                width: 1920,
+                height: 1080,
+                refresh_millihertz: 60_001,
+            }),
+            scale: Some(1.5),
+            transform: Some(Transform::Rotate90),
+            position: None,
+            vrr: Some(VrrMode::Off),
+        };
+        let plan =
+            plan_output_configuration(&outputs, &BTreeMap::new(), &OutputId::new("eDP-1"), &update)
+                .unwrap();
+        assert_eq!(plan.outputs.len(), 2);
+
+        let mut observed = outputs.clone();
+        if let Some(logical) = observed[0].logical.as_mut() {
+            logical.scale = 1.5;
+            logical.transform = "90".to_owned();
+        }
+        observed[0].vrr_supported = true;
+        observed[0].vrr_enabled = false;
+        verify_plan(&plan, &observed).unwrap();
+
+        let mut wrong_scale = observed.clone();
+        if let Some(logical) = wrong_scale[0].logical.as_mut() {
+            logical.scale = 1.0;
+        }
+        let error = verify_plan(&plan, &wrong_scale).unwrap_err();
+        assert!(error.contains("scale"), "unexpected error: {error}");
+
+        let mut wrong_transform = observed.clone();
+        if let Some(logical) = wrong_transform[0].logical.as_mut() {
+            logical.transform = "normal".to_owned();
+        }
+        let error = verify_plan(&plan, &wrong_transform).unwrap_err();
+        assert!(error.contains("transform"), "unexpected error: {error}");
+
+        let mut wrong_mode = observed.clone();
+        wrong_mode[0].modes.push(DisplayMode {
+            width: 1280,
+            height: 720,
+            refresh_rate: 60_000,
+            is_preferred: false,
+        });
+        wrong_mode[0].current_mode = Some(1);
+        let error = verify_plan(&plan, &wrong_mode).unwrap_err();
+        assert!(error.contains("1280x720"), "unexpected error: {error}");
+
+        let mut wrong_vrr = observed;
+        wrong_vrr[0].vrr_enabled = true;
+        let error = verify_plan(&plan, &wrong_vrr).unwrap_err();
+        assert!(error.contains("VRR"), "unexpected error: {error}");
     }
 }
