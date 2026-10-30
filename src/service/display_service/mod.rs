@@ -14,11 +14,13 @@
 //! All external effects go through the injected [`NiriClient`],
 //! [`HardwareProbe`], [`ConfigStore`], and [`ProcessSupervisor`] traits.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use super::backup_service::{ConfigError, ConfigMode, ConfigStore};
-use crate::domain::display::{ConnectorStatus, DisplayOutput};
+use crate::domain::display::{ConnectorStatus, DisplayOutput, OutputId};
+use crate::domain::output::{OutputPreferences, OutputUpdate};
 use crate::domain::profile::{self, LayoutPlan, MirrorPlan, PlanError, ProfileKind};
 use crate::infrastructure::drm_sysfs::{HardwareError, HardwareProbe};
 use crate::infrastructure::kdl_parser;
@@ -63,6 +65,8 @@ pub struct SystemState {
     pub mirror_running: bool,
     pub config_mode: ConfigMode,
     pub display_file_registered: bool,
+    /// Preferences recovered from the managed fence, keyed by output name.
+    pub output_preferences: BTreeMap<String, OutputPreferences>,
 }
 
 /// Outcome of a successful profile application.
@@ -144,7 +148,9 @@ where
     pub fn refresh_state(&self) -> Result<SystemState, ServiceError> {
         let outputs = self.niri.outputs()?;
         let connectors = self.probe.connectors()?;
-        let active_profile = kdl_parser::section_profile(&self.config.read_managed_config()?);
+        let managed_contents = self.config.read_managed_config()?;
+        let active_profile = kdl_parser::section_profile(&managed_contents);
+        let output_preferences = kdl_parser::parse_section_preferences(&managed_contents);
         let mirror_running = self.supervisor.is_running()?;
         let display_file_registered = self.config.display_file_registered()?;
         Ok(SystemState {
@@ -154,43 +160,88 @@ where
             mirror_running,
             config_mode: self.config.mode(),
             display_file_registered,
+            output_preferences,
         })
     }
 
-    /// Apply a profile using the fail-safe pipeline.
+    /// Apply a quick profile using the fail-safe pipeline.
     pub fn apply_profile(&self, profile: ProfileKind) -> Result<ApplyReport, ServiceError> {
         let outputs = self.niri.outputs()?;
         let connectors = self.probe.connectors()?;
 
-        let layout = profile::plan_profile(profile, &outputs, &connectors)?;
-        let mut warnings = collect_warnings(profile, &layout, &outputs, &connectors);
-
-        let registered = self.config.display_file_registered()?;
-        if self.config.mode() == ConfigMode::Modular && !registered {
-            if profile != ProfileKind::InternalOnly {
-                return Err(ServiceError::SetupRequired(format!(
-                    "{} is not included by {}; add `include \"cfg/display.kdl\"` to the main configuration, or run without --display-config to use the portable inline mode",
-                    self.config.managed_config_path().display(),
-                    self.config.main_config_path().display()
-                )));
-            }
-            warnings.push(
-                "the configured display file is not included by the main niri configuration; changes may not take effect"
-                    .to_owned(),
-            );
+        if profile == ProfileKind::InternalOnly {
+            return self.restore_internal_only(&outputs);
         }
 
-        // Never leave a stale mirror running when the profile changes.
+        let mut layout = profile::plan_profile(profile, &outputs, &connectors)?;
+        let stored = self.stored_preferences()?;
+        profile::apply_preferences(&mut layout, &stored, &outputs);
+        let warnings = collect_warnings(profile, &layout, &outputs, &connectors);
+        self.ensure_setup()?;
+        let report = self.execute_layout(&layout, warnings)?;
+
+        if profile == ProfileKind::Mirror {
+            let mirror_plan = profile::plan_mirror(&outputs)?;
+            if let Err(error) = self.start_mirror(&mirror_plan) {
+                self.rollback();
+                return Err(error);
+            }
+        }
+        Ok(report)
+    }
+
+    /// Apply per-monitor settings for a single output.
+    ///
+    /// All currently known outputs are included in the resulting plan so their
+    /// settings are preserved in the managed fence. The same backup, validate,
+    /// reload, verification, and rollback pipeline is used.
+    pub fn apply_output_config(
+        &self,
+        output: &OutputId,
+        update: &OutputUpdate,
+    ) -> Result<ApplyReport, ServiceError> {
+        let outputs = self.niri.outputs()?;
+        let stored = self.stored_preferences()?;
+        let layout = profile::plan_output_configuration(&outputs, &stored, output, update)?;
+        self.ensure_setup()?;
+        self.execute_layout(&layout, Vec::new())
+    }
+
+    /// Reset to the pristine configuration and re-enable the panel.
+    fn restore_internal_only(
+        &self,
+        outputs: &[DisplayOutput],
+    ) -> Result<ApplyReport, ServiceError> {
+        self.stop_mirror()?;
+        let _outcome = self.config.restore_snapshot()?;
+        if let Err(error) = self.niri.validate_config(self.config.main_config_path()) {
+            return Err(ServiceError::ValidationFailed(error.to_string()));
+        }
+        self.niri.load_config()?;
+        self.ensure_internal_enabled(outputs)?;
+        Ok(ApplyReport {
+            profile: ProfileKind::InternalOnly,
+            warnings: Vec::new(),
+            layout: LayoutPlan {
+                profile: ProfileKind::InternalOnly,
+                outputs: Vec::new(),
+                focus_output: None,
+            },
+        })
+    }
+
+    /// Shared write/validate/reload/verify/rollback pipeline.
+    fn execute_layout(
+        &self,
+        layout: &LayoutPlan,
+        warnings: Vec<String>,
+    ) -> Result<ApplyReport, ServiceError> {
+        // Never leave a stale mirror running when the layout changes.
         self.stop_mirror()?;
 
         self.config.snapshot()?;
-
-        if profile == ProfileKind::InternalOnly {
-            let _outcome = self.config.restore_snapshot()?;
-        } else {
-            let section = kdl_parser::render_section(&layout);
-            self.config.write_managed_section(&section)?;
-        }
+        let section = kdl_parser::render_section(layout);
+        self.config.write_managed_section(&section)?;
 
         if let Err(error) = self.niri.validate_config(self.config.main_config_path()) {
             self.rollback();
@@ -200,32 +251,38 @@ where
             self.rollback();
             return Err(ServiceError::Niri(error));
         }
-        if let Err(mismatch) = self.verify_layout(&layout) {
+        if let Err(mismatch) = self.verify_layout(layout) {
             self.rollback();
             return Err(ServiceError::VerificationFailed(mismatch));
         }
 
-        if profile == ProfileKind::InternalOnly {
-            self.ensure_internal_enabled(&outputs)?;
-        }
         if let Some(focus) = &layout.focus_output
             && let Err(error) = self.niri.focus_output(focus)
         {
             log::warn!("failed to focus output {focus}: {error}");
         }
-        if profile == ProfileKind::Mirror {
-            let mirror_plan = profile::plan_mirror(&outputs)?;
-            if let Err(error) = self.start_mirror(&mirror_plan) {
-                self.rollback();
-                return Err(error);
-            }
-        }
 
         Ok(ApplyReport {
-            profile,
+            profile: layout.profile,
             warnings,
-            layout,
+            layout: layout.clone(),
         })
+    }
+
+    fn ensure_setup(&self) -> Result<(), ServiceError> {
+        if self.config.mode() == ConfigMode::Modular && !self.config.display_file_registered()? {
+            return Err(ServiceError::SetupRequired(format!(
+                "{} is not included by {}; add `include \"cfg/display.kdl\"` to the main configuration, or run without --display-config to use the portable inline mode",
+                self.config.managed_config_path().display(),
+                self.config.main_config_path().display()
+            )));
+        }
+        Ok(())
+    }
+
+    fn stored_preferences(&self) -> Result<BTreeMap<String, OutputPreferences>, ServiceError> {
+        let contents = self.config.read_managed_config()?;
+        Ok(kdl_parser::parse_section_preferences(&contents))
     }
 
     /// Stop the supervised mirror process and clear its pid file.

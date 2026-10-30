@@ -1,5 +1,6 @@
 use super::*;
 use crate::domain::display::{DisplayMode, LogicalGeometry, OutputId};
+use crate::domain::output::{ModeSpec, OutputUpdate, Transform, VrrMode};
 use crate::service::backup_service::{RestoreOutcome, SnapshotOutcome};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -891,6 +892,140 @@ fn setup_required_state_fails_fast_for_writes_but_allows_reset() {
         .service
         .apply_profile(ProfileKind::InternalOnly)
         .unwrap();
+}
+
+#[test]
+fn per_output_settings_are_written_and_verified() {
+    let base = vec![
+        enabled_output("eDP-1", 1920),
+        enabled_output("HDMI-A-1", 2560),
+    ];
+    let mut applied = base.clone();
+    if let Some(logical) = applied[0].logical.as_mut() {
+        logical.scale = 1.5;
+        logical.transform = "90".to_owned();
+    }
+    let fixture = make_service(
+        FakeNiri::new(base).with_pending(applied),
+        vec![],
+        FakeConfig::with_display("// user config\n"),
+        FakeSupervisor::default(),
+    );
+
+    let update = OutputUpdate {
+        enabled: true,
+        mode: Some(ModeSpec {
+            width: 1920,
+            height: 1080,
+            refresh_millihertz: 60_001,
+        }),
+        scale: Some(1.5),
+        transform: Some(Transform::Rotate90),
+        position: Some((0, 0)),
+        vrr: Some(VrrMode::Off),
+    };
+    let report = fixture
+        .service
+        .apply_output_config(&OutputId::new("eDP-1"), &update)
+        .unwrap();
+    assert_eq!(report.profile, ProfileKind::Custom);
+
+    let display = fixture.config.display();
+    assert!(display.contains("// profile: custom"));
+    assert!(display.contains("mode \"1920x1080@60.001\""));
+    assert!(display.contains("scale 1.5"));
+    assert!(display.contains("transform \"90\""));
+    assert!(!display.contains("variable-refresh-rate"));
+}
+
+#[test]
+fn per_output_verification_mismatch_rolls_back() {
+    let base = vec![
+        enabled_output("eDP-1", 1920),
+        enabled_output("HDMI-A-1", 2560),
+    ];
+    let fixture = make_service(
+        FakeNiri::new(base),
+        vec![],
+        FakeConfig::with_display("// user config\n"),
+        FakeSupervisor::default(),
+    );
+
+    let update = OutputUpdate {
+        enabled: true,
+        mode: None,
+        scale: Some(1.5),
+        transform: None,
+        position: None,
+        vrr: None,
+    };
+    let error = fixture
+        .service
+        .apply_output_config(&OutputId::new("eDP-1"), &update)
+        .unwrap_err();
+    assert!(
+        matches!(error, ServiceError::VerificationFailed(_)),
+        "got {error}"
+    );
+    assert_eq!(fixture.config.display(), "// user config\n");
+}
+
+#[test]
+fn per_output_apply_requires_setup_for_unregistered_display_files() {
+    let fixture = make_service(
+        FakeNiri::new(vec![enabled_output("eDP-1", 1920)]),
+        vec![],
+        FakeConfig::with_display("// user config\n").unregistered(),
+        FakeSupervisor::default(),
+    );
+    let update = OutputUpdate {
+        enabled: true,
+        mode: None,
+        scale: None,
+        transform: None,
+        position: None,
+        vrr: None,
+    };
+    let error = fixture
+        .service
+        .apply_output_config(&OutputId::new("eDP-1"), &update)
+        .unwrap_err();
+    assert!(
+        matches!(error, ServiceError::SetupRequired(_)),
+        "got {error}"
+    );
+    assert_eq!(fixture.config.display(), "// user config\n");
+    assert_eq!(fixture.config.backup(), None);
+}
+
+#[test]
+fn per_output_plan_rejects_disabling_the_last_display_before_writing() {
+    let fixture = make_service(
+        FakeNiri::new(vec![enabled_output("eDP-1", 1920)]),
+        vec![],
+        FakeConfig::with_display("// user config\n"),
+        FakeSupervisor::default(),
+    );
+    let update = OutputUpdate {
+        enabled: false,
+        mode: None,
+        scale: None,
+        transform: None,
+        position: None,
+        vrr: None,
+    };
+    let error = fixture
+        .service
+        .apply_output_config(&OutputId::new("eDP-1"), &update)
+        .unwrap_err();
+    assert!(
+        matches!(error, ServiceError::Plan(PlanError::LastDisplayDisabled)),
+        "got {error}"
+    );
+    assert_eq!(fixture.config.display(), "// user config\n");
+    assert_eq!(fixture.config.backup(), None);
+    let calls = fixture.niri.calls();
+    assert!(!calls.contains(&"validate".to_owned()));
 }
 
 #[test]
