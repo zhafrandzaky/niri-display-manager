@@ -13,6 +13,8 @@ use common::{
     FakeNiri, FakeProbe, FakeSupervisor, connector, disabled_output, enabled_output, pid_path,
     realize, store,
 };
+use niri_display_manager::domain::display::OutputId;
+use niri_display_manager::domain::output::{ModeSpec, OutputUpdate, Transform, VrrMode};
 use niri_display_manager::domain::profile::{self, PlanError, ProfileKind};
 use niri_display_manager::infrastructure::kdl_parser;
 use niri_display_manager::infrastructure::niri_ipc::{WindowInfo, WorkspaceInfo};
@@ -217,6 +219,66 @@ fn mirror_flow_spawns_wl_mirror_and_records_the_pid() {
 
     service.stop_mirror().unwrap();
     assert_eq!(pid_file.read().unwrap(), None);
+}
+
+#[test]
+fn per_monitor_settings_persist_in_inline_mode() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = store(directory.path(), ConfigMode::Inline);
+    let original = "// vanilla niri config\noutput \"DP-1\" {\n    scale 2\n}\n";
+    fs::create_dir_all(config.main_config_path().parent().unwrap()).unwrap();
+    fs::write(config.main_config_path(), original).unwrap();
+
+    let base = vec![
+        enabled_output("eDP-1", 1920),
+        enabled_output("HDMI-A-1", 2560),
+    ];
+    let mut applied = base.clone();
+    if let Some(logical) = applied[0].logical.as_mut() {
+        logical.scale = 1.5;
+        logical.transform = "180".to_owned();
+    }
+    let service = make_service(
+        FakeNiri::new(base).with_pending(applied),
+        vec![],
+        config.clone(),
+        FakeSupervisor::default(),
+        &directory,
+    );
+
+    let update = OutputUpdate {
+        enabled: true,
+        mode: Some(ModeSpec {
+            width: 1920,
+            height: 1080,
+            refresh_millihertz: 60_001,
+        }),
+        scale: Some(1.5),
+        transform: Some(Transform::Rotate180),
+        position: Some((0, 0)),
+        vrr: Some(VrrMode::Off),
+    };
+    let report = service
+        .apply_output_config(&OutputId::new("eDP-1"), &update)
+        .unwrap();
+    assert_eq!(report.profile, ProfileKind::Custom);
+
+    let written = fs::read_to_string(config.main_config_path()).unwrap();
+    assert!(written.starts_with(original));
+    assert!(written.contains("// profile: custom"));
+    assert!(written.contains("mode \"1920x1080@60.001\""));
+    assert!(written.contains("scale 1.5"));
+    assert!(written.contains("transform \"180\""));
+    assert_eq!(
+        fs::read_to_string(directory.path().join("niri/config.kdl.bak")).unwrap(),
+        original
+    );
+
+    service.apply_profile(ProfileKind::InternalOnly).unwrap();
+    assert_eq!(
+        fs::read_to_string(config.main_config_path()).unwrap(),
+        original
+    );
 }
 
 #[test]
